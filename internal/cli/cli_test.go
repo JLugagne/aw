@@ -39,6 +39,7 @@ func setup(t *testing.T) *env {
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", gitcfg)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("GIT_AUTHOR_NAME", "test")
 	t.Setenv("GIT_AUTHOR_EMAIL", "test@example.invalid")
 	t.Setenv("GIT_COMMITTER_NAME", "test")
@@ -56,8 +57,12 @@ func setup(t *testing.T) *env {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	e := &env{t: t, root: root, cfgPath: filepath.Join(root, "config", "aw.yaml")}
-	cfg := &config.Config{Base: filepath.Join(root, "base"), Workspaces: filepath.Join(root, "ws"), Editor: "myeditor --wait"}
-	if err := cfg.Save(e.cfgPath); err != nil {
+	local := &config.Config{Base: filepath.Join(root, "base"), Workspaces: filepath.Join(root, "ws"), Editor: "myeditor --wait"}
+	data, err := local.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteFile(config.LocalPathFor(e.cfgPath), data); err != nil {
 		t.Fatal(err)
 	}
 	return e
@@ -520,5 +525,122 @@ func TestPinSelectedRepositories(t *testing.T) {
 	p := e.config().Sessions["s1"].Projects
 	if p[0].Branch != "" || p[1].Branch != "b-branch" {
 		t.Fatalf("unexpected projects after selective pin: %+v", p)
+	}
+}
+
+func bareRemote(t *testing.T, e *env) string {
+	t.Helper()
+	dir := filepath.Join(e.root, "config-remote.git")
+	e.git(e.root, "init", "-q", "--bare", "-b", "main", dir)
+	return dir
+}
+
+func TestConfigSyncBetweenMachines(t *testing.T) {
+	a := setup(t)
+	remote := bareRemote(t, a)
+	b := setup(t)
+	urlA, _ := a.remote("alpha")
+
+	a.mustRun("create", "s1", urlA)
+	a.mustRun("config", "remote", remote)
+	if out := a.mustRun("config", "remote"); !strings.Contains(out, remote) {
+		t.Fatalf("remote not stored:\n%s", out)
+	}
+	shared, err := os.ReadFile(a.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(shared), remote) {
+		t.Fatal("remote URL written to the shared config")
+	}
+	if _, stderr, err := a.run("", false, "config", "sync"); err != nil || !strings.Contains(stderr, "pushed as revision 1") {
+		t.Fatalf("push: %v\n%s", err, stderr)
+	}
+
+	b.mustRun("config", "remote", remote)
+	if out := b.mustRun("config", "status"); !strings.Contains(out, "remote changes to pull") {
+		t.Fatalf("status before pull:\n%s", out)
+	}
+	b.mustRun("config", "sync")
+	if _, ok := b.config().Sessions["s1"]; !ok {
+		t.Fatal("session not pulled")
+	}
+	if out := b.mustRun("config", "status"); !strings.Contains(out, "in sync") {
+		t.Fatalf("status after pull:\n%s", out)
+	}
+}
+
+func TestConfigSyncDesyncNeedsResolution(t *testing.T) {
+	a := setup(t)
+	remote := bareRemote(t, a)
+	b := setup(t)
+	a.mustRun("create", "s1", "--name", "base")
+	a.mustRun("config", "remote", remote)
+	a.mustRun("config", "sync")
+	b.mustRun("config", "remote", remote)
+	b.mustRun("config", "sync")
+
+	rename := func(e *env, name string) {
+		c := e.config()
+		c.Sessions["s1"].Name = name
+		if err := c.Save(e.cfgPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rename(a, "from-a")
+	a.mustRun("config", "sync")
+	rename(b, "from-b")
+
+	_, _, err := b.run("", false, "config", "sync")
+	if !errors.Is(err, cli.ErrDesync) || !strings.Contains(err.Error(), "--theirs") {
+		t.Fatalf("want an actionable desync error, got %v", err)
+	}
+	if out := b.mustRun("config", "status"); !strings.Contains(out, "DESYNC") {
+		t.Fatalf("status should report the desync:\n%s", out)
+	}
+	if _, stderr, err := b.run("r\n", true, "config", "sync"); err != nil || !strings.Contains(stderr, "DESYNC on session s1") {
+		t.Fatalf("interactive resolution: %v\n%s", err, stderr)
+	}
+	if got := b.config().Sessions["s1"].Name; got != "from-a" {
+		t.Fatalf("remote side not taken: %q", got)
+	}
+}
+
+func TestConfigAutoSync(t *testing.T) {
+	a := setup(t)
+	remote := bareRemote(t, a)
+	b := setup(t)
+	a.mustRun("config", "remote", remote, "--auto")
+	b.mustRun("config", "remote", remote, "--auto")
+
+	a.mustRun("create", "s1", "--name", "from-a")
+	b.mustRun("create", "s2")
+	if _, ok := b.config().Sessions["s1"]; !ok {
+		t.Fatal("b did not pull s1 before creating s2")
+	}
+	a.mustRun("create", "s3")
+	a.mustRun("config", "sync")
+	for _, id := range []string{"s1", "s2", "s3"} {
+		if _, ok := a.config().Sessions[id]; !ok {
+			t.Fatalf("%s missing on a", id)
+		}
+	}
+
+	c := b.config()
+	c.Sessions["s1"].Name = "edited-on-b"
+	if err := c.Save(b.cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	c = a.config()
+	c.Sessions["s1"].Name = "edited-on-a"
+	if err := c.Save(a.cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	a.mustRun("config", "sync")
+	if _, _, err := b.run("", false, "create", "blocked"); !errors.Is(err, cli.ErrDesync) {
+		t.Fatalf("a desync must block mutating commands, got %v", err)
+	}
+	if _, ok := b.config().Sessions["blocked"]; ok {
+		t.Fatal("command ran despite the desync")
 	}
 }

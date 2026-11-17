@@ -100,6 +100,21 @@ LLM agents and scripts: read "aw help agents" first.`,
 		a.upgradeCmd(),
 		a.agentsTopic(),
 	)
+	modes := map[string]string{
+		"create": syncMutate, "add": syncMutate, "detach": syncMutate, "remove": syncMutate, "pin": syncMutate,
+		"run": syncPull, "edit": syncPull, "sync": syncPull,
+	}
+	for _, c := range root.Commands() {
+		if mode, ok := modes[c.Name()]; ok {
+			c.Annotations = map[string]string{syncAnnotation: mode}
+		}
+	}
+	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		return a.autoSync(cmd, args, false)
+	}
+	root.PersistentPostRunE = func(cmd *cobra.Command, args []string) error {
+		return a.autoSync(cmd, args, true)
+	}
 	return root
 }
 
@@ -120,21 +135,29 @@ func (a *App) manager(cfg *config.Config) *workspace.Manager {
 	return &workspace.Manager{Config: cfg, Git: git.Git{Progress: a.Err}, Log: a.Err}
 }
 
+func (a *App) readLine() string {
+	if a.reader == nil {
+		a.reader = bufio.NewReader(a.In)
+	}
+	line, err := a.reader.ReadString('\n')
+	if err != nil && line == "" {
+		fmt.Fprintln(a.Err)
+		return ""
+	}
+	return line
+}
+
 func (a *App) confirm(question string, def bool) bool {
 	if !a.Interactive {
 		return false
-	}
-	if a.reader == nil {
-		a.reader = bufio.NewReader(a.In)
 	}
 	hint := " [y/N] "
 	if def {
 		hint = " [Y/n] "
 	}
 	fmt.Fprint(a.Err, question+hint)
-	line, err := a.reader.ReadString('\n')
-	if err != nil && line == "" {
-		fmt.Fprintln(a.Err)
+	line := a.readLine()
+	if line == "" {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(line)) {

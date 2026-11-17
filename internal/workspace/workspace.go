@@ -79,7 +79,7 @@ func (m *Manager) plan(id string, s *config.Session) ([]Entry, error) {
 		if e.Branch == "" {
 			e.Branch = id
 		}
-		e.Ref, e.Err = repo.Parse(p.Repo, m.Config.Protocol)
+		e.Ref, e.Err = repo.Parse(p.Repo, m.Config.ProtocolName())
 		if e.Err == nil {
 			e.Cache = filepath.Join(base, filepath.FromSlash(e.Ref.Path))
 		}
@@ -104,7 +104,7 @@ func (m *Manager) scan(ctx context.Context, sessionDir string) ([]found, error) 
 		}
 		f := found{dir: dir, branch: m.Git.CurrentBranch(ctx, dir)}
 		if url, err := m.Git.RemoteURL(ctx, dir); err == nil {
-			if ref, err := repo.Parse(url, m.Config.Protocol); err == nil {
+			if ref, err := repo.Parse(url, m.Config.ProtocolName()); err == nil {
 				f.path = ref.Path
 			}
 		}

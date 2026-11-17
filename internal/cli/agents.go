@@ -58,10 +58,19 @@ RECIPES
     aw detach -y "$AW_SESSION" infra
     aw remove -y billing
 
+  Config shared between machines (git gist/snippet, see "aw config --help"):
+    aw config status --json                 (base/remote revisions, changes)
+    aw config sync                          (fails on a desync without a
+                                             terminal: ask the user, then
+                                             re-run with --ours or --theirs)
+  With sync.auto, commands that modify the config fail on a desync with the
+  same message; never pick --ours/--theirs without the user's decision.
+
   Locate things:
     aw ls --json          sessions
     aw path <session>     workspace directory
-    aw config --path      config file (YAML, see README)
+    aw config --path      shared config file (YAML, see README)
+    aw config --local --path   machine-specific overlay (never synced)
 
 JSON OUTPUT
   aw ls --json
