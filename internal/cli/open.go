@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -33,6 +35,7 @@ func (o *openOptions) register(cmd *cobra.Command) {
 func (a *App) runCmd() *cobra.Command {
 	var opts openOptions
 	var tool string
+	var resume bool
 	cmd := &cobra.Command{
 		Use:   "run <session> [-- tool args...]",
 		Short: "Prepare a session and launch the coding agent in it",
@@ -42,11 +45,18 @@ replace aw with the tool (default from the config, "claude" otherwise),
 started in the session directory with --add-dir for every repository.
 Arguments after -- are passed to the tool.
 
+The repository directories are given on every launch, so resume through aw
+("aw run -c <session>" or "aw run <session> -- --resume <id>") rather than
+with the tool alone, which would not see them again. For claude,
+CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 is set (unless already in
+your environment) so each repository's CLAUDE.md is loaded.
+
 This command replaces aw with an interactive program: agents and scripts
 should use "aw sync" instead.`,
 		Example: `  aw run billing
   aw run --tool=opencode billing
-  aw run billing --pull -- --continue`,
+  aw run -c billing                    # resume the latest conversation
+  aw run billing -- --resume <id>      # resume a given conversation`,
 		Args:              cobra.MinimumNArgs(1),
 		ValidArgsFunction: a.completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,6 +73,12 @@ should use "aw sync" instead.`,
 			}
 			t := cfg.ResolveTool(tool)
 			argv := append([]string{t.Command}, t.Args...)
+			if resume {
+				if len(t.ContinueArgs) == 0 {
+					return fmt.Errorf("tool %q has no continue_args in the config; pass its resume flag after --", tool)
+				}
+				argv = append(argv, t.ContinueArgs...)
+			}
 			if t.AddDirFlag != "" {
 				for _, e := range entries {
 					if e.Present() {
@@ -70,11 +86,13 @@ should use "aw sync" instead.`,
 					}
 				}
 			}
-			return a.launch(argv, args[1:], dir, []string{"AW_SESSION=" + id})
+			fmt.Fprintf(a.Err, "resume later with: aw run -c %s\n", id)
+			return a.launch(argv, args[1:], dir, append([]string{"AW_SESSION=" + id}, defaultEnv(t.Env)...))
 		},
 	}
 	opts.register(cmd)
 	cmd.Flags().StringVarP(&tool, "tool", "t", "", "tool to launch (claude, opencode, codex or any command)")
+	cmd.Flags().BoolVarP(&resume, "continue", "c", false, "resume the latest conversation of the session (tool continue_args)")
 	return cmd
 }
 
@@ -148,8 +166,32 @@ func (a *App) launch(argv, extra []string, dir string, env []string) error {
 		return errors.Join(fmt.Errorf("cannot launch %q", argv[0]), err)
 	}
 	full := append(append([]string{}, argv...), extra...)
-	environ := append(os.Environ(), "PWD="+dir)
-	return a.Exec(path, full, dir, append(environ, env...))
+	return a.Exec(path, full, dir, mergeEnv(os.Environ(), append([]string{"PWD=" + dir}, env...)))
+}
+
+func mergeEnv(base, overrides []string) []string {
+	keys := map[string]bool{}
+	for _, kv := range overrides {
+		k, _, _ := strings.Cut(kv, "=")
+		keys[k] = true
+	}
+	out := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		if k, _, _ := strings.Cut(kv, "="); !keys[k] {
+			out = append(out, kv)
+		}
+	}
+	return append(out, overrides...)
+}
+
+func defaultEnv(env map[string]string) []string {
+	var out []string
+	for _, k := range slices.Sorted(maps.Keys(env)) {
+		if _, set := os.LookupEnv(k); !set {
+			out = append(out, k+"="+env[k])
+		}
+	}
+	return out
 }
 
 func (a *App) open(ctx context.Context, cfg *config.Config, query string, opts openOptions) (string, string, []workspace.Entry, error) {

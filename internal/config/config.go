@@ -4,6 +4,7 @@ package config
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,11 +43,17 @@ type Session struct {
 
 // Tool describes how to launch an agent CLI inside a session directory.
 type Tool struct {
-	Command string   `yaml:"command"`
+	Command string   `yaml:"command,omitempty"`
 	Args    []string `yaml:"args,omitempty"`
 	// AddDirFlag is emitted before every project directory. When empty the
 	// tool only receives the session directory as working directory.
 	AddDirFlag string `yaml:"add_dir_flag,omitempty"`
+	// ContinueArgs resume the latest conversation ("aw run -c"); they are
+	// placed before the project directories.
+	ContinueArgs []string `yaml:"continue_args,omitempty"`
+	// Env holds defaults: a variable already defined in the caller's
+	// environment is never overridden.
+	Env map[string]string `yaml:"env,omitempty"`
 }
 
 // Config mirrors the YAML file. Use the accessor methods rather than the raw
@@ -62,9 +69,14 @@ type Config struct {
 }
 
 var builtinTools = map[string]Tool{
-	"claude":   {Command: "claude", AddDirFlag: "--add-dir"},
+	"claude": {
+		Command:      "claude",
+		AddDirFlag:   "--add-dir",
+		ContinueArgs: []string{"--continue"},
+		Env:          map[string]string{"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"},
+	},
 	"codex":    {Command: "codex", AddDirFlag: "--add-dir"},
-	"opencode": {Command: "opencode"},
+	"opencode": {Command: "opencode", ContinueArgs: []string{"--continue"}},
 }
 
 // DefaultPath returns $AW_CONFIG, else $XDG_CONFIG_HOME/aw/config.yaml, else
@@ -178,20 +190,38 @@ func (c *Config) EditorCommand(override string) []string {
 	return []string{"vi"}
 }
 
-// ResolveTool looks name up in the "tools" section, then in the built-in
-// definitions (claude, codex, opencode). Any other name is run as a command
-// without extra arguments.
+// ResolveTool returns the built-in definition of name (claude, codex,
+// opencode), or a bare command for any other name, overlaid with the fields
+// set in the "tools" section. Env maps are merged, the config winning.
 func (c *Config) ResolveTool(name string) Tool {
-	if t, ok := c.Tools[name]; ok {
-		if t.Command == "" {
-			t.Command = name
+	t := Tool{Command: name}
+	if b, ok := builtinTools[name]; ok {
+		t = b
+	}
+	t.Env = maps.Clone(t.Env)
+	o, ok := c.Tools[name]
+	if !ok {
+		return t
+	}
+	if o.Command != "" {
+		t.Command = o.Command
+	}
+	if o.Args != nil {
+		t.Args = o.Args
+	}
+	if o.AddDirFlag != "" {
+		t.AddDirFlag = o.AddDirFlag
+	}
+	if o.ContinueArgs != nil {
+		t.ContinueArgs = o.ContinueArgs
+	}
+	if len(o.Env) > 0 {
+		if t.Env == nil {
+			t.Env = map[string]string{}
 		}
-		return t
+		maps.Copy(t.Env, o.Env)
 	}
-	if t, ok := builtinTools[name]; ok {
-		return t
-	}
-	return Tool{Command: name}
+	return t
 }
 
 // AddSession registers an empty session. It returns ErrInvalidID or
