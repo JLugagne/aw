@@ -50,6 +50,10 @@ RECIPES
     aw create billing --name "Billing" github.com/acme/api github.com/acme/web
     aw sync billing
 
+  Record in the config the branches checked out in the session (after a
+  "git checkout" in one of its repositories):
+    aw pin "$AW_SESSION"                    (add --dry-run to preview)
+
   Remove a repository from a session / delete a session:
     aw detach -y "$AW_SESSION" infra
     aw remove -y billing

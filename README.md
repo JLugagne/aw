@@ -48,6 +48,7 @@ aw run -c billing                    # resume the latest conversation, same dire
 aw run billing -- --resume <id>      # resume a given conversation
 aw run --tool=opencode billing       # another tool
 aw edit billing                      # open the session folder in your editor
+aw pin billing                       # save the branches checked out in the session into the config
 cd "$(aw path billing)"
 aw remove billing                    # warns about uncommitted / unpushed work first
 aw upgrade                           # self-update
@@ -138,6 +139,7 @@ drops comments.
 | `aw run <s> [-c] [-t tool] [--pull\|--no-pull] [--no-fetch] [-- args]` | prepare, then launch the tool |
 | `aw edit <s> [-e editor]` | prepare, then open the editor |
 | `aw sync <s> [--pull] [--json]` | prepare without launching anything |
+| `aw pin <s> [repo...] [--dry-run]` | write the checked-out branches into the session config |
 | `aw path <s>` | print the session directory |
 | `aw config [--path]` | edit the config file |
 | `aw upgrade [--check] [--force] [--source]` | self-update from GitHub releases |
