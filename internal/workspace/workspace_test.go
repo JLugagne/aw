@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/JLugagne/aw/internal/config"
+	"github.com/JLugagne/aw/internal/git"
 	"github.com/JLugagne/aw/internal/workspace"
 )
 
@@ -168,8 +169,8 @@ func TestSameRepoInTwoSessions(t *testing.T) {
 	}
 	mustOK(t, e1)
 	mustOK(t, e2)
-	if e1[0].Clone != e2[0].Clone || e1[0].Dir == e2[0].Dir {
-		t.Fatalf("expected one shared clone and two worktrees: %+v / %+v", e1[0], e2[0])
+	if e1[0].Cache != e2[0].Cache || e1[0].Dir == e2[0].Dir {
+		t.Fatalf("expected one shared cache and two session repositories: %+v / %+v", e1[0], e2[0])
 	}
 }
 
@@ -187,19 +188,99 @@ func TestSameRepoTwiceInOneSession(t *testing.T) {
 	}
 }
 
-func TestBranchAlreadyCheckedOut(t *testing.T) {
+func TestSameBranchInTwoSessions(t *testing.T) {
 	f := newFixture(t)
 	url, _ := f.remote("alpha")
 	ctx := context.Background()
-	if _, err := f.mgr.Prepare(ctx, "s1", f.session("s1", config.Project{Repo: url, Branch: "shared"}), true); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := f.mgr.Prepare(ctx, "s2", f.session("s2", config.Project{Repo: url, Branch: "shared"}), true)
+	e1, err := f.mgr.Prepare(ctx, "s1", f.session("s1", config.Project{Repo: url, Branch: "shared"}), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entries[0].Err == nil || !strings.Contains(entries[0].Err.Error(), "shared") {
-		t.Fatalf("expected a branch-in-use error, got %v", entries[0].Err)
+	e2, err := f.mgr.Prepare(ctx, "s2", f.session("s2", config.Project{Repo: url, Branch: "shared"}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, e1)
+	mustOK(t, e2)
+	if e1[0].Status.Branch != "shared" || e2[0].Status.Branch != "shared" {
+		t.Fatalf("branch not checked out in both sessions: %q %q", e1[0].Status.Branch, e2[0].Status.Branch)
+	}
+}
+
+func TestSessionRepositoryUsesRealRemote(t *testing.T) {
+	f := newFixture(t)
+	url, work := f.remote("alpha")
+	f.git(work, "push", "origin", "main:feature")
+	ctx := context.Background()
+	entries, err := f.mgr.Prepare(ctx, "s1", f.session("s1", config.Project{Repo: url, Branch: "feature"}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, entries)
+	dir := entries[0].Dir
+	if got := f.git(dir, "remote", "get-url", "origin"); got != url {
+		t.Fatalf("origin = %q, want %q", got, url)
+	}
+	if up := entries[0].Status.Upstream; up != "origin/feature" {
+		t.Fatalf("upstream = %q", up)
+	}
+	if branches := f.git(dir, "branch", "--format=%(refname:short)"); branches != "feature" {
+		t.Fatalf("stray local branches: %q", branches)
+	}
+	f.commit(dir, "FROM_SESSION", "x")
+	f.git(dir, "push", "origin", "feature")
+	f.git(work, "fetch", "origin")
+	f.git(work, "cat-file", "-e", "origin/feature:FROM_SESSION")
+}
+
+func TestCacheOnOtherBranchDoesNotLeak(t *testing.T) {
+	f := newFixture(t)
+	url, work := f.remote("alpha")
+	f.commit(work, "SIDE", "x")
+	f.git(work, "push", "origin", "main:side")
+	f.git(work, "reset", "--hard", "HEAD~1")
+	ctx := context.Background()
+	entries, err := f.mgr.Prepare(ctx, "s1", f.session("s1", config.Project{Repo: url}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := entries[0].Cache
+	f.git(cache, "checkout", "-q", "side")
+	f.commit(cache, "LOCAL_ONLY", "x")
+
+	entries, err = f.mgr.Prepare(ctx, "s2", f.session("s2", config.Project{Repo: url}), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, entries)
+	if base := entries[0].Status.Base; base != "origin/main" {
+		t.Fatalf("base = %q, want origin/main", base)
+	}
+	if _, err := os.Stat(filepath.Join(entries[0].Dir, "SIDE")); err == nil {
+		t.Fatal("session branch created from the cache's checked-out branch")
+	}
+	if entries[0].Status.Unpushed != 0 {
+		t.Fatalf("cache-only commits leaked: %+v", entries[0].Status)
+	}
+}
+
+func TestBranchSwitchInsideSessionIsNotOrphaned(t *testing.T) {
+	f := newFixture(t)
+	url, _ := f.remote("alpha")
+	s := f.session("s1", config.Project{Repo: url})
+	ctx := context.Background()
+	entries, err := f.mgr.Prepare(ctx, "s1", s, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.git(entries[0].Dir, "checkout", "-q", "-b", "experiment")
+	again, err := f.mgr.Prepare(ctx, "s1", s, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, again)
+	if len(again) != 1 || again[0].Dir != entries[0].Dir || again[0].Status.Branch != "experiment" {
+		t.Fatalf("switched repository not recognised: %+v", again)
 	}
 }
 
@@ -228,34 +309,15 @@ func TestRemoveDetectsLocalWorkAndCleansUp(t *testing.T) {
 		t.Fatalf("local work not detected: %+v", st)
 	}
 
-	if err := f.mgr.Remove(ctx, "s1", false); err != nil {
+	if err := f.mgr.Remove("s1"); err != nil {
 		t.Fatal(err)
 	}
 	sessionDir, _ := f.mgr.SessionDir("s1")
 	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
 		t.Fatalf("session dir still present: %v", err)
 	}
-	clone := entries[0].Clone
-	if list := f.git(clone, "worktree", "list"); strings.Contains(list, sessionDir) {
-		t.Fatalf("worktree still registered:\n%s", list)
-	}
-	f.git(clone, "rev-parse", "--verify", "refs/heads/s1")
-}
-
-func TestRemoveDeletesBranches(t *testing.T) {
-	f := newFixture(t)
-	url, _ := f.remote("alpha")
-	s := f.session("s1", config.Project{Repo: url})
-	ctx := context.Background()
-	entries, err := f.mgr.Prepare(ctx, "s1", s, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.mgr.Remove(ctx, "s1", true); err != nil {
-		t.Fatal(err)
-	}
-	if out := f.git(entries[0].Clone, "branch", "--list", "s1"); out != "" {
-		t.Fatalf("branch not deleted: %q", out)
+	if !git.IsRepo(entries[0].Cache) {
+		t.Fatal("shared cache removed with the session")
 	}
 }
 
@@ -275,5 +337,34 @@ func TestInspectReportsOrphans(t *testing.T) {
 	}
 	if len(entries) != 2 || !entries[1].Orphan || !entries[1].Present() {
 		t.Fatalf("expected one orphan, got %+v", entries)
+	}
+}
+
+func TestLocalWorkOnOtherBranchesAndStashesIsDetected(t *testing.T) {
+	f := newFixture(t)
+	url, _ := f.remote("alpha")
+	s := f.session("s1", config.Project{Repo: url})
+	ctx := context.Background()
+	entries, err := f.mgr.Prepare(ctx, "s1", s, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := entries[0].Dir
+	f.git(dir, "checkout", "-q", "-b", "side")
+	f.commit(dir, "SIDE", "x")
+	f.git(dir, "checkout", "-q", "s1")
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.git(dir, "stash")
+
+	entries, err = f.mgr.Inspect(ctx, "s1", s, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, entries)
+	st := entries[0].Status
+	if st.Unpushed != 1 || st.Stashes != 1 || !st.HasLocalWork() {
+		t.Fatalf("local work on other branches or in stashes not detected: %+v", st)
 	}
 }

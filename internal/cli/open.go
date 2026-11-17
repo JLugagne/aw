@@ -39,7 +39,7 @@ func (a *App) runCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <session> [-- tool args...]",
 		Short: "Prepare a session and launch the coding agent in it",
-		Long: `Clone missing repositories, fetch the others, create missing worktrees,
+		Long: `Clone missing repositories into the session, fetch the others,
 report repositories that are behind and offer to fast-forward them, then
 replace aw with the tool (default from the config, "claude" otherwise),
 started in the session directory with --add-dir for every repository.
@@ -130,9 +130,9 @@ func (a *App) syncCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "sync <session>",
-		Short: "Prepare a session (clone, fetch, worktrees) without launching anything",
+		Short: "Prepare a session (clone, fetch) without launching anything",
 		Long: `Same preparation as "aw run" without launching a tool: clone missing
-repositories, fetch, create missing worktrees, report the state and
+repositories, fetch the others, report the state and
 fast-forward when --pull is given (or confirmed interactively). Safe for
 agents and scripts. Exits non-zero if a repository could not be prepared.`,
 		Example: `  aw sync billing
@@ -285,6 +285,9 @@ func describe(e workspace.Entry) string {
 	}
 	if st.Dirty > 0 {
 		parts = append(parts, fmt.Sprintf("%d uncommitted", st.Dirty))
+	}
+	if st.Stashes > 0 {
+		parts = append(parts, fmt.Sprintf("%d stashed", st.Stashes))
 	}
 	if e.Orphan {
 		parts = append(parts, "not in config")

@@ -71,9 +71,9 @@ func (a *App) Root() *cobra.Command {
 		Use:   "aw",
 		Short: "Manage multi-repository agent workspaces",
 		Long: `aw groups repositories into named sessions. Each session gets its own
-directory with one git worktree per repository, backed by shared clones under
-the base directory, and opens your coding agent (claude, opencode, ...) or
-editor on it.
+directory with one clone per repository, cheaply created from a shared cache
+under the base directory (any branch can be used by several sessions), and
+opens your coding agent (claude, opencode, ...) or editor on it.
 
 LLM agents and scripts: read "aw help agents" first.`,
 		Version:       a.Version,
