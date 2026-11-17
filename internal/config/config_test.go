@@ -143,3 +143,22 @@ func TestEditorCommand(t *testing.T) {
 		t.Fatalf("default = %v", got)
 	}
 }
+
+func TestResolveToolMergesBuiltin(t *testing.T) {
+	c := &config.Config{Tools: map[string]config.Tool{
+		"claude": {Args: []string{"--permission-mode", "plan"}, Env: map[string]string{"FOO": "bar"}},
+	}}
+	got := c.ResolveTool("claude")
+	if got.Command != "claude" || got.AddDirFlag != "--add-dir" || len(got.Args) != 2 {
+		t.Fatalf("builtin fields lost: %+v", got)
+	}
+	if got.Env["CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"] != "1" || got.Env["FOO"] != "bar" {
+		t.Fatalf("env not merged: %v", got.Env)
+	}
+	if len(got.ContinueArgs) != 1 || got.ContinueArgs[0] != "--continue" {
+		t.Fatalf("continue args lost: %v", got.ContinueArgs)
+	}
+	if builtin := (&config.Config{}).ResolveTool("claude"); builtin.Env["FOO"] != "" {
+		t.Fatal("config override leaked into the builtin definition")
+	}
+}

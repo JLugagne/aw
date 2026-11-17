@@ -395,3 +395,68 @@ func TestNonInteractiveRefusalExplainsFlags(t *testing.T) {
 		t.Fatalf("want an actionable abort, got %v", err)
 	}
 }
+
+func envValues(environ []string, key string) []string {
+	var out []string
+	for _, kv := range environ {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func TestRunEnvironmentHasNoDuplicates(t *testing.T) {
+	e := setup(t)
+	url, _ := e.remote("alpha")
+	e.mustRun("create", "s1", url)
+	t.Setenv("PWD", "/somewhere/else")
+	t.Setenv("AW_SESSION", "previous")
+	e.mustRun("run", "s1")
+	sessionDir := filepath.Join(e.root, "ws", "s1")
+	if got := envValues(e.launches[0].env, "PWD"); !slices.Equal(got, []string{sessionDir}) {
+		t.Fatalf("PWD values = %v, want only %s", got, sessionDir)
+	}
+	if got := envValues(e.launches[0].env, "AW_SESSION"); !slices.Equal(got, []string{"s1"}) {
+		t.Fatalf("AW_SESSION values = %v", got)
+	}
+}
+
+func TestRunLoadsAddDirClaudeMD(t *testing.T) {
+	e := setup(t)
+	url, _ := e.remote("alpha")
+	e.mustRun("create", "s1", url)
+	t.Setenv("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "")
+	os.Unsetenv("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD")
+	e.mustRun("run", "s1")
+	if got := envValues(e.launches[0].env, "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"); !slices.Equal(got, []string{"1"}) {
+		t.Fatalf("default not applied: %v", got)
+	}
+	t.Setenv("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "0")
+	e.mustRun("run", "s1")
+	if got := envValues(e.launches[1].env, "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"); !slices.Equal(got, []string{"0"}) {
+		t.Fatalf("user environment overridden: %v", got)
+	}
+}
+
+func TestRunContinueKeepsAddDirs(t *testing.T) {
+	e := setup(t)
+	url, _ := e.remote("alpha")
+	e.mustRun("create", "s1", url)
+	e.mustRun("run", "-c", "s1")
+	worktree := filepath.Join(e.root, "ws", "s1", "alpha")
+	if got := e.launches[0].argv; !slices.Equal(got, []string{"claude", "--continue", "--add-dir", worktree}) {
+		t.Fatalf("claude continue argv = %v", got)
+	}
+	e.mustRun("run", "--continue", "--tool", "opencode", "s1")
+	if got := e.launches[1].argv; !slices.Equal(got, []string{"opencode", "--continue"}) {
+		t.Fatalf("opencode continue argv = %v", got)
+	}
+	if _, _, err := e.run("", false, "run", "-c", "--tool", "myeditor", "s1"); err == nil || !strings.Contains(err.Error(), "continue_args") {
+		t.Fatalf("want a continue_args error, got %v", err)
+	}
+	e.mustRun("run", "s1", "--", "--resume", "abc")
+	if got := e.launches[2].argv; !slices.Equal(got, []string{"claude", "--add-dir", worktree, "--resume", "abc"}) {
+		t.Fatalf("resume argv = %v", got)
+	}
+}
