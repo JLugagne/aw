@@ -14,9 +14,13 @@ import (
 	"strings"
 )
 
-// ErrNoDefaultBranch is returned by DefaultBranch when origin/HEAD cannot be
-// resolved and neither origin/main nor origin/master exists.
-var ErrNoDefaultBranch = errors.New("cannot determine the default branch of origin")
+var (
+	// ErrNoDefaultBranch is returned by DefaultBranch when origin/HEAD cannot
+	// be resolved and neither origin/main nor origin/master exists.
+	ErrNoDefaultBranch = errors.New("cannot determine the default branch of origin")
+	// ErrFetch marks a failed fetch that did not prevent the operation.
+	ErrFetch = errors.New("fetch failed")
+)
 
 // Git runs git commands. The zero value is usable.
 type Git struct {
@@ -24,18 +28,21 @@ type Git struct {
 	Progress io.Writer
 }
 
-// Status describes a worktree relative to the ref it should track.
+// Status describes a repository relative to the ref it should track.
 type Status struct {
 	Branch string `json:"branch"`
 	// Upstream is the tracking ref, empty when the branch has none.
 	Upstream string `json:"upstream,omitempty"`
 	// Base is the ref Ahead and Behind are computed against: Upstream when
 	// set, otherwise the remote default branch.
-	Base     string `json:"base,omitempty"`
-	Ahead    int    `json:"ahead"`
-	Behind   int    `json:"behind"`
-	Dirty    int    `json:"dirty"`
-	Unpushed int    `json:"unpushed"`
+	Base   string `json:"base,omitempty"`
+	Ahead  int    `json:"ahead"`
+	Behind int    `json:"behind"`
+	Dirty  int    `json:"dirty"`
+	// Unpushed counts commits of any local branch absent from every
+	// remote-tracking ref.
+	Unpushed int `json:"unpushed"`
+	Stashes  int `json:"stashes"`
 }
 
 // CanFastForward reports whether merging Base only moves HEAD forward.
@@ -43,10 +50,9 @@ func (s Status) CanFastForward() bool {
 	return s.Behind > 0 && s.Ahead == 0
 }
 
-// HasLocalWork reports changes that are lost when the worktree is deleted.
-// Unpushed counts commits absent from every remote-tracking ref.
+// HasLocalWork reports work that is lost when the repository is deleted.
 func (s Status) HasLocalWork() bool {
-	return s.Dirty > 0 || s.Unpushed > 0
+	return s.Dirty > 0 || s.Unpushed > 0 || s.Stashes > 0
 }
 
 func (g Git) run(ctx context.Context, dir string, args ...string) (string, error) {
@@ -134,73 +140,68 @@ func (g Git) RemoteBranchExists(ctx context.Context, repoDir, branch string) boo
 	return g.refExists(ctx, repoDir, "refs/remotes/origin/"+branch)
 }
 
-// AddWorktree checks branch out in dir. An existing local branch is used as
-// is; otherwise branch is created from origin/branch (tracking it) when that
-// exists, or from origin/<defaultBranch> without tracking. Git refuses when
-// the branch is already checked out in another worktree.
-func (g Git) AddWorktree(ctx context.Context, repoDir, dir, branch string) error {
-	if _, err := g.run(ctx, repoDir, "worktree", "prune"); err != nil {
-		return err
-	}
-	if g.LocalBranchExists(ctx, repoDir, branch) {
-		_, err := g.run(ctx, repoDir, "worktree", "add", dir, branch)
-		return err
-	}
-	if g.RemoteBranchExists(ctx, repoDir, branch) {
-		_, err := g.run(ctx, repoDir, "worktree", "add", "--track", "-b", branch, dir, "origin/"+branch)
-		return err
-	}
-	def, err := g.DefaultBranch(ctx, repoDir)
+// CloneSession creates an independent repository at dir, checked out on
+// branch, so the same branch can be used by any number of sessions. Objects
+// are hardlinked from cache (copied across filesystems) and origin is set to
+// url, then fetched. branch tracks origin/branch when it exists, otherwise it
+// is created from origin/<default branch of cache>. A failed fetch is not
+// fatal: the cache's refs are used and the returned error wraps ErrFetch.
+func (g Git) CloneSession(ctx context.Context, cache, url, dir, branch string) error {
+	def, err := g.DefaultBranch(ctx, cache)
 	if err != nil {
 		return err
 	}
-	_, err = g.run(ctx, repoDir, "worktree", "add", "--no-track", "-b", branch, dir, "origin/"+def)
-	return err
-}
-
-// RemoveWorktree deletes the worktree at dir, discarding uncommitted changes.
-func (g Git) RemoveWorktree(ctx context.Context, repoDir, dir string) error {
-	_, err := g.run(ctx, repoDir, "worktree", "remove", "--force", "--force", dir)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return err
+	}
+	if _, err := g.run(ctx, filepath.Dir(dir), "clone", "--quiet", "--no-checkout", cache, dir); err != nil {
+		return err
+	}
+	initial := g.CurrentBranch(ctx, dir)
+	if _, err := g.run(ctx, dir, "remote", "set-url", "origin", url); err != nil {
+		return err
+	}
+	fetchErr := g.Fetch(ctx, dir)
+	if _, err := g.run(ctx, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+def); err != nil {
+		return err
+	}
+	if g.RemoteBranchExists(ctx, dir, branch) {
+		_, err = g.run(ctx, dir, "checkout", "--quiet", "--track", "-B", branch, "origin/"+branch)
+	} else {
+		_, err = g.run(ctx, dir, "checkout", "--quiet", "--no-track", "-B", branch, "origin/"+def)
+	}
 	if err != nil {
-		if _, statErr := os.Stat(dir); errors.Is(statErr, os.ErrNotExist) {
-			_, err = g.run(ctx, repoDir, "worktree", "prune")
+		return err
+	}
+	if initial != "" && initial != branch {
+		if _, err := g.run(ctx, dir, "branch", "-D", initial); err != nil {
+			return err
 		}
 	}
-	return err
+	if fetchErr != nil {
+		return errors.Join(ErrFetch, fetchErr)
+	}
+	return nil
 }
 
-// DeleteBranch force-deletes a local branch.
-func (g Git) DeleteBranch(ctx context.Context, repoDir, branch string) error {
-	_, err := g.run(ctx, repoDir, "branch", "-D", branch)
-	return err
+// RemoteURL returns the URL of origin.
+func (g Git) RemoteURL(ctx context.Context, dir string) (string, error) {
+	return g.run(ctx, dir, "remote", "get-url", "origin")
 }
 
-// WorktreeInfo returns the main repository a linked worktree belongs to and
-// its checked-out branch ("" when HEAD is detached).
-func (g Git) WorktreeInfo(ctx context.Context, dir string) (string, string, error) {
-	out, err := g.run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir", "--abbrev-ref", "HEAD")
+// CurrentBranch returns the checked-out branch, "" when HEAD is detached.
+func (g Git) CurrentBranch(ctx context.Context, dir string) string {
+	b, err := g.run(ctx, dir, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
-		return "", "", err
+		return ""
 	}
-	common, branch, _ := strings.Cut(out, "\n")
-	repoDir := common
-	if filepath.Base(common) == ".git" {
-		repoDir = filepath.Dir(common)
-	}
-	if branch == "HEAD" {
-		branch = ""
-	}
-	return repoDir, branch, nil
+	return b
 }
 
-// Status inspects the worktree at dir. fallbackBase is compared against when
+// Status inspects the repository at dir. fallbackBase is compared against when
 // the branch has no upstream (typically "origin/main").
 func (g Git) Status(ctx context.Context, dir, fallbackBase string) (Status, error) {
-	var s Status
-	branch, err := g.run(ctx, dir, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err == nil {
-		s.Branch = branch
-	}
+	s := Status{Branch: g.CurrentBranch(ctx, dir)}
 	porcelain, err := g.run(ctx, dir, "status", "--porcelain")
 	if err != nil {
 		return s, err
@@ -223,11 +224,15 @@ func (g Git) Status(ctx context.Context, dir, fallbackBase string) (Status, erro
 		s.Ahead, _ = strconv.Atoi(left)
 		s.Behind, _ = strconv.Atoi(right)
 	}
-	unpushed, err := g.run(ctx, dir, "rev-list", "--count", "HEAD", "--not", "--remotes")
+	unpushed, err := g.run(ctx, dir, "rev-list", "--count", "HEAD", "--branches", "--not", "--remotes")
 	if err != nil {
 		return s, err
 	}
 	s.Unpushed, _ = strconv.Atoi(unpushed)
+	stashes, err := g.run(ctx, dir, "rev-list", "--walk-reflogs", "--count", "refs/stash")
+	if err == nil {
+		s.Stashes, _ = strconv.Atoi(stashes)
+	}
 	return s, nil
 }
 

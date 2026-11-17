@@ -28,13 +28,13 @@ type Ref struct {
 	URL  string
 }
 
-// Name is the last element of Path, used to name the worktree directory.
+// Name is the last element of Path, used to name the session directory of the repository.
 func (r Ref) Name() string {
 	return path.Base(r.Path)
 }
 
 // Owner is the element of Path preceding Name, used to disambiguate
-// worktree directories when two repositories share the same Name.
+// session directories when two repositories share the same Name.
 func (r Ref) Owner() string {
 	return path.Base(path.Dir(r.Path))
 }

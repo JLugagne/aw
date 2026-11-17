@@ -29,13 +29,14 @@ default to `~/src` and the tool to `claude`.
 aw run billing
 ```
 
-`aw run` does five things:
+`aw run` does four things:
 
-- clones missing repositories
-- fetches the others
-- creates one worktree per repository in `~/src/.aw/sessions/billing/`
+- clones each repository into `~/src/.aw/sessions/billing/` (cheap: objects
+  are hardlinked from a shared cache), or fetches it if already there
 - shows which repositories are behind and asks whether to pull
-- starts `claude --add-dir …` in the session directory
+- starts `claude --add-dir …` in the session directory, with each
+  repository's `CLAUDE.md` loaded
+- prints how to resume: `aw run -c billing`
 
 **4. Day to day**
 
@@ -43,8 +44,9 @@ aw run billing
 aw ls                                # sessions
 aw show billing                      # git state of each repository
 aw add billing github.com/acme/infra # add a repository (checked out right away)
+aw run -c billing                    # resume the latest conversation, same directories
+aw run billing -- --resume <id>      # resume a given conversation
 aw run --tool=opencode billing       # another tool
-aw run billing -- --continue         # extra arguments for the tool
 aw edit billing                      # open the session folder in your editor
 cd "$(aw path billing)"
 aw remove billing                    # warns about uncommitted / unpushed work first
@@ -64,11 +66,16 @@ workspaces: ~/src/.aw/sessions   # optional (default shown)
 tool: claude                     # default for aw run: claude, opencode, codex or any command
 editor: code -n                  # aw edit; falls back to $VISUAL, $EDITOR, vi
 protocol: ssh                    # ssh or https, for host/owner/name specs
-tools:                           # optional: override or add tools
+tools:                           # optional: overlay the built-in tools or add new ones
   claude:
-    command: claude
     args: [--permission-mode, plan]
-    add_dir_flag: --add-dir      # repeated before each worktree; empty = cwd only
+    # built-in: command: claude, add_dir_flag: --add-dir, continue_args: [--continue],
+    #           env: {CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1"}
+  mytool:
+    command: mytool
+    add_dir_flag: --dir          # repeated before each repository; empty = cwd only
+    continue_args: [--resume-last]
+    env: {MYTOOL_MODE: agent}    # defaults: never override your environment
 sessions:
   billing:
     name: Billing refactor
@@ -85,32 +92,38 @@ drops comments.
 ## How it works
 
 ```
-~/src/github.com/acme/api           shared clone, cloned once
+~/src/github.com/acme/api           shared cache, cloned once (can be your own working copy)
 ~/src/github.com/acme/web
 ~/src/.aw/sessions/billing/         session directory = the tool's working directory
-├── api    worktree on feature_1
-└── web    worktree on billing
+├── api    standalone clone on feature_1, origin = github.com/acme/api
+└── web    standalone clone on billing
 ```
 
-- **Worktrees.** Each session has its own worktree of every repository, so
-  the same repository can belong to many sessions without being cloned again.
-  Git does not allow one branch in two worktrees at once, so two sessions
-  that share a repository need different branches. aw tells you when they
-  collide.
+- **One clone per session.** Each session repository is a full, independent
+  clone. Its objects are hardlinked from the shared cache (copied if on
+  another filesystem) and `origin` points to the real remote, so creating it
+  costs almost no disk or network. Any branch can be checked out in as many
+  sessions as you like; push to share commits between them.
 - **Branches.** A project without `branch` uses the session id as its
   branch. aw checks it out from `origin/<branch>` if that exists, and
   otherwise creates it from the remote default branch.
 - **Updates.** `run`, `sync` and `edit` fetch every repository first. Branches
   that are only behind can be fast-forwarded. Diverged branches are reported
   but left alone.
-- **Safe removal.** `remove` and `detach` list uncommitted changes and
-  commits that are on no remote, then ask before deleting. `-y` does not skip
-  that question; only `--force` does. Branches are kept in the shared clone,
-  so committed work stays reachable unless you pass `--delete-branches`.
+- **Safe removal.** Deleting a session deletes its clones. Before that,
+  `remove` and `detach` list uncommitted changes, commits that are on no
+  remote (on any branch) and stashes, then ask for confirmation. `-y` does not
+  skip that question; only `--force` does. The shared caches are kept.
 - **Typos.** A mistyped session id gets a "did you mean" suggestion.
   Interactive commands offer to use it; `remove` and `detach` never guess.
-- **Session context.** The tool runs with `AW_SESSION=<id>` set. A
-  `CLAUDE.md` placed in the session directory applies to the whole session.
+- **Claude Code.** claude is started with `--add-dir` for every repository
+  and `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` (unless you set it
+  yourself), so each repository's `CLAUDE.md` is loaded. A `CLAUDE.md` in
+  the session directory applies to the whole session. `AW_SESSION=<id>` is
+  exported.
+- **Resuming.** `--add-dir` directories are not restored when a conversation
+  is resumed with `claude --continue` alone. Resume through aw instead:
+  `aw run -c <s>` or `aw run <s> -- --resume <id>`.
 
 ## Commands
 
@@ -120,9 +133,9 @@ drops comments.
 | `aw show <s> [--json] [--no-fetch]` | git state of each repository |
 | `aw create <s> [repo[@branch]...] [-n name] [-b branch]` | create a session |
 | `aw add <s> repo[@branch]... [--no-checkout]` | add repositories |
-| `aw detach <s> <repo> [-b branch] [-y] [--force] [--delete-branch]` | remove one repository |
-| `aw remove <s> [-y] [--force] [--keep-config] [--delete-branches]` | delete workspace and session |
-| `aw run <s> [-t tool] [--pull\|--no-pull] [--no-fetch] [-- args]` | prepare, then launch the tool |
+| `aw detach <s> <repo> [-b branch] [-y] [--force]` | remove one repository |
+| `aw remove <s> [-y] [--force] [--keep-config]` | delete workspace and session |
+| `aw run <s> [-c] [-t tool] [--pull\|--no-pull] [--no-fetch] [-- args]` | prepare, then launch the tool |
 | `aw edit <s> [-e editor]` | prepare, then open the editor |
 | `aw sync <s> [--pull] [--json]` | prepare without launching anything |
 | `aw path <s>` | print the session directory |

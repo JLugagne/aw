@@ -89,9 +89,10 @@ func (a *App) showCmd() *cobra.Command {
 		Aliases: []string{"status"},
 		Short:   "Show the git state of every repository of a session",
 		Long: `Fetch (unless --no-fetch) and report, for every repository of the session,
-its worktree, branch, commits behind/ahead of its upstream (or of the remote
+its directory, branch, commits behind/ahead of its upstream (or of the remote
 default branch when it has none), uncommitted paths and commits absent from
-every remote. Worktrees found on disk but no longer configured are flagged.`,
+every remote, and stashes. Repositories found in the session directory but no
+longer configured are flagged.`,
 		Example: `  aw show billing
   aw show --json --no-fetch "$AW_SESSION"`,
 		Args:              cobra.ExactArgs(1),
@@ -193,7 +194,7 @@ func (a *App) addCmd() *cobra.Command {
 		Use:   "add <session> <repo[@branch]>...",
 		Short: "Add repositories to a session",
 		Long: `Add repositories to a session. When the session workspace already exists
-the repositories are cloned if needed and their worktrees created right away,
+the repositories are cloned into it right away,
 so a running agent can use them immediately (they live under the session
 directory, its working directory).`,
 		Example: `  aw add billing github.com/acme/infra
@@ -222,7 +223,7 @@ directory, its working directory).`,
 				return err
 			}
 			if _, statErr := os.Stat(dir); noCheckout || statErr != nil {
-				fmt.Fprintf(a.Out, "worktrees are created on the next: aw run %s (or aw sync %s)\n", id, id)
+				fmt.Fprintf(a.Out, "repositories are cloned on the next: aw run %s (or aw sync %s)\n", id, id)
 				return nil
 			}
 			entries, err := mgr.Prepare(cmd.Context(), id, s, false)
@@ -238,7 +239,7 @@ directory, its working directory).`,
 		},
 	}
 	cmd.Flags().StringVarP(&branch, "branch", "b", "", "branch for repositories given without @branch")
-	cmd.Flags().BoolVar(&noCheckout, "no-checkout", false, "only update the config, do not create worktrees now")
+	cmd.Flags().BoolVar(&noCheckout, "no-checkout", false, "only update the config, do not clone now")
 	return cmd
 }
 
@@ -290,11 +291,11 @@ func addProjects(cfg *config.Config, id string, s *config.Session, specs []strin
 
 func (a *App) detachCmd() *cobra.Command {
 	var branch string
-	var yes, force, deleteBranch bool
+	var yes, force bool
 	cmd := &cobra.Command{
 		Use:     "detach <session> <repo>",
 		Aliases: []string{"rm-repo"},
-		Short:   "Remove a repository from a session and delete its worktree",
+		Short:   "Remove a repository from a session and delete its clone",
 		Long: `Remove a repository from a session. <repo> is the spec as written in the
 config, its host/owner/name path or just its name. Uncommitted or unpushed
 work triggers a warning and an extra confirmation.`,
@@ -325,7 +326,7 @@ work triggers a warning and an extra confirmation.`,
 				if !a.checkLocalWork([]workspace.Entry{e}, yes, force, fmt.Sprintf("Detach %s from %s and delete %s?", e.Project.Repo, id, e.Dir)) {
 					return a.aborted()
 				}
-				if err := mgr.RemoveWorktree(cmd.Context(), e, deleteBranch); err != nil {
+				if err := os.RemoveAll(e.Dir); err != nil {
 					return err
 				}
 			}
@@ -340,7 +341,6 @@ work triggers a warning and an extra confirmation.`,
 	cmd.Flags().StringVarP(&branch, "branch", "b", "", "select the project by branch when the repository appears several times")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask for confirmation when there is no local work")
 	cmd.Flags().BoolVar(&force, "force", false, "do not ask for confirmation even if local work would be lost")
-	cmd.Flags().BoolVar(&deleteBranch, "delete-branch", false, "also delete the local branch")
 	return cmd
 }
 
@@ -384,7 +384,7 @@ func (a *App) checkLocalWork(entries []workspace.Entry, yes, force bool, questio
 	if len(risky) == 0 {
 		return yes || a.confirm(question, false)
 	}
-	fmt.Fprintln(a.Err, "WARNING: the following worktrees hold work that is not on any remote:")
+	fmt.Fprintln(a.Err, "WARNING: the following repositories hold work that is not on any remote:")
 	for _, e := range risky {
 		var parts []string
 		if e.Err != nil {
@@ -394,7 +394,10 @@ func (a *App) checkLocalWork(entries []workspace.Entry, yes, force bool, questio
 			parts = append(parts, fmt.Sprintf("%d uncommitted change(s) (lost)", e.Status.Dirty))
 		}
 		if e.Status.Unpushed > 0 {
-			parts = append(parts, fmt.Sprintf("%d unpushed commit(s) on branch %s", e.Status.Unpushed, e.Status.Branch))
+			parts = append(parts, fmt.Sprintf("%d unpushed commit(s)", e.Status.Unpushed))
+		}
+		if e.Status.Stashes > 0 {
+			parts = append(parts, fmt.Sprintf("%d stash(es)", e.Status.Stashes))
 		}
 		fmt.Fprintf(a.Err, "  %s: %s\n", e.Dir, strings.Join(parts, ", "))
 	}
@@ -402,15 +405,16 @@ func (a *App) checkLocalWork(entries []workspace.Entry, yes, force bool, questio
 }
 
 func (a *App) removeCmd() *cobra.Command {
-	var yes, force, keepConfig, deleteBranches bool
+	var yes, force, keepConfig bool
 	cmd := &cobra.Command{
 		Use:     "remove <session>",
 		Aliases: []string{"rm", "delete"},
 		Short:   "Delete a session and its workspace",
-		Long: `Delete the session workspace (all its worktrees) and remove it from the
-config. Uncommitted or unpushed work triggers a warning and a confirmation.
-Local branches are kept in the shared clones unless --delete-branches is set,
-so committed work stays reachable.`,
+		Long: `Delete the session workspace (its repositories) and remove it from the
+config. Every repository is a standalone clone, so uncommitted changes,
+commits on any branch that are not on a remote, and stashes are lost: they
+trigger a warning and a confirmation that only --force skips. The shared
+caches under the base directory are kept.`,
 		Example: `  aw remove billing
   aw remove billing -y                 # no prompt if nothing would be lost
   aw remove billing --keep-config -y   # free the disk, keep the definition`,
@@ -441,7 +445,7 @@ so committed work stays reachable.`,
 			if !a.checkLocalWork(entries, yes, force, question) {
 				return a.aborted()
 			}
-			if err := mgr.Remove(cmd.Context(), id, deleteBranches); err != nil {
+			if err := mgr.Remove(id); err != nil {
 				return err
 			}
 			if !keepConfig {
@@ -457,7 +461,6 @@ so committed work stays reachable.`,
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask for confirmation when there is no local work")
 	cmd.Flags().BoolVar(&force, "force", false, "do not ask for confirmation even if local work would be lost")
 	cmd.Flags().BoolVar(&keepConfig, "keep-config", false, "only delete the workspace, keep the session definition")
-	cmd.Flags().BoolVar(&deleteBranches, "delete-branches", false, "also delete the local branches of the worktrees")
 	return cmd
 }
 

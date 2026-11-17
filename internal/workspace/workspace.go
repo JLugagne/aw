@@ -1,8 +1,8 @@
-// Package workspace materialises a session as a directory holding one git
-// worktree per project. Worktrees share the clone found at
-// <base>/<host>/<owner>/<name>, so a repository used by several sessions is
-// cloned once; each session checks out its own branch (the session id unless
-// the project sets one), as git forbids the same branch in two worktrees.
+// Package workspace materialises a session as a directory holding one
+// independent git repository per project. Each is cloned from the shared
+// cache at <base>/<host>/<owner>/<name> with hardlinked objects, then pointed
+// at the real remote, so sessions cost little disk or network and any branch
+// can be checked out in several sessions at once.
 package workspace
 
 import (
@@ -31,25 +31,26 @@ type Manager struct {
 type Entry struct {
 	Project config.Project `json:"project"`
 	Ref     repo.Ref       `json:"-"`
-	Clone   string         `json:"clone"`
-	Branch  string         `json:"branch"`
-	// Dir is the worktree directory, empty when not checked out.
+	// Cache is the shared clone the session repository is created from.
+	Cache  string `json:"cache"`
+	Branch string `json:"branch"`
+	// Dir is the session repository, empty when not checked out yet.
 	Dir    string     `json:"dir,omitempty"`
 	Status git.Status `json:"status"`
-	// Orphan marks a worktree found on disk but absent from the config.
+	// Orphan marks a repository found on disk but absent from the config.
 	Orphan bool `json:"orphan,omitempty"`
 	// Warning is a non-fatal problem, such as a failed fetch.
 	Warning string `json:"warning,omitempty"`
 	Err     error  `json:"-"`
 }
 
-// Present reports whether the worktree exists on disk.
+// Present reports whether the session repository exists on disk.
 func (e Entry) Present() bool {
 	return e.Dir != ""
 }
 
 type found struct {
-	dir, clone, branch string
+	dir, path, branch string
 }
 
 // SessionDir returns the directory of session id.
@@ -80,7 +81,7 @@ func (m *Manager) plan(id string, s *config.Session) ([]Entry, error) {
 		}
 		e.Ref, e.Err = repo.Parse(p.Repo, m.Config.Protocol)
 		if e.Err == nil {
-			e.Clone = filepath.Join(base, filepath.FromSlash(e.Ref.Path))
+			e.Cache = filepath.Join(base, filepath.FromSlash(e.Ref.Path))
 		}
 		entries = append(entries, e)
 	}
@@ -101,41 +102,36 @@ func (m *Manager) scan(ctx context.Context, sessionDir string) ([]found, error) 
 		if !it.IsDir() || !git.IsRepo(dir) {
 			continue
 		}
-		clone, branch, err := m.Git.WorktreeInfo(ctx, dir)
-		if err != nil {
-			continue
+		f := found{dir: dir, branch: m.Git.CurrentBranch(ctx, dir)}
+		if url, err := m.Git.RemoteURL(ctx, dir); err == nil {
+			if ref, err := repo.Parse(url, m.Config.Protocol); err == nil {
+				f.path = ref.Path
+			}
 		}
-		out = append(out, found{dir: dir, clone: clone, branch: branch})
+		out = append(out, f)
 	}
 	return out, nil
 }
 
-func samePath(a, b string) bool {
-	ra, errA := filepath.EvalSymlinks(a)
-	rb, errB := filepath.EvalSymlinks(b)
-	if errA != nil || errB != nil {
-		return filepath.Clean(a) == filepath.Clean(b)
-	}
-	return ra == rb
-}
-
-func match(entries []Entry, worktrees []found) []found {
-	used := make([]bool, len(worktrees))
-	for i := range entries {
-		e := &entries[i]
-		if e.Err != nil {
-			continue
-		}
-		for j, w := range worktrees {
-			if !used[j] && w.branch == e.Branch && samePath(w.clone, e.Clone) {
-				e.Dir = w.dir
-				used[j] = true
-				break
+func match(entries []Entry, repos []found) []found {
+	used := make([]bool, len(repos))
+	for _, sameBranch := range []bool{true, false} {
+		for i := range entries {
+			e := &entries[i]
+			if e.Err != nil || e.Present() {
+				continue
+			}
+			for j, r := range repos {
+				if !used[j] && r.path == e.Ref.Path && (!sameBranch || r.branch == e.Branch) {
+					e.Dir = r.dir
+					used[j] = true
+					break
+				}
 			}
 		}
 	}
 	var orphans []found
-	for j, w := range worktrees {
+	for j, w := range repos {
 		if !used[j] {
 			orphans = append(orphans, w)
 		}
@@ -144,7 +140,7 @@ func match(entries []Entry, worktrees []found) []found {
 }
 
 // Inspect reports the state of every project of the session without creating
-// anything. Worktrees present on disk but no longer configured are returned
+// anything. Repositories present on disk but no longer configured are returned
 // with Orphan set. With fetch, remote refs are refreshed first; fetch
 // failures are reported as warnings.
 func (m *Manager) Inspect(ctx context.Context, id string, s *config.Session, fetch bool) ([]Entry, error) {
@@ -156,7 +152,7 @@ func (m *Manager) Inspect(ctx context.Context, id string, s *config.Session, fet
 	if err != nil {
 		return nil, err
 	}
-	worktrees, err := m.scan(ctx, sessionDir)
+	repos, err := m.scan(ctx, sessionDir)
 	if err != nil {
 		return nil, err
 	}
@@ -164,12 +160,15 @@ func (m *Manager) Inspect(ctx context.Context, id string, s *config.Session, fet
 	if err != nil {
 		return nil, err
 	}
-	for _, o := range match(entries, worktrees) {
-		rel, _ := filepath.Rel(base, o.clone)
+	for _, o := range match(entries, repos) {
+		name := o.path
+		if name == "" {
+			name = filepath.Base(o.dir)
+		}
 		entries = append(entries, Entry{
-			Project: config.Project{Repo: filepath.ToSlash(rel), Branch: o.branch},
-			Ref:     repo.Ref{Spec: o.clone, Path: filepath.ToSlash(rel)},
-			Clone:   o.clone,
+			Project: config.Project{Repo: name, Branch: o.branch},
+			Ref:     repo.Ref{Spec: name, Path: name},
+			Cache:   filepath.Join(base, filepath.FromSlash(name)),
 			Branch:  o.branch,
 			Dir:     o.dir,
 			Orphan:  true,
@@ -179,8 +178,9 @@ func (m *Manager) Inspect(ctx context.Context, id string, s *config.Session, fet
 	return entries, nil
 }
 
-// Prepare clones missing repositories, fetches existing ones (when fetch is
-// set) and creates missing worktrees, then reports every project's state.
+// Prepare clones missing caches, creates missing session repositories and
+// fetches the existing ones (when fetch is set), then reports every
+// project's state.
 // Per-project failures are stored in Entry.Err so one broken repository does
 // not prevent opening the others.
 func (m *Manager) Prepare(ctx context.Context, id string, s *config.Session, fetch bool) ([]Entry, error) {
@@ -195,43 +195,44 @@ func (m *Manager) Prepare(ctx context.Context, id string, s *config.Session, fet
 	if err != nil {
 		return nil, err
 	}
-	worktrees, err := m.scan(ctx, sessionDir)
+	repos, err := m.scan(ctx, sessionDir)
 	if err != nil {
 		return nil, err
 	}
-	match(entries, worktrees)
-	fetched := map[string]bool{}
+	match(entries, repos)
 	for i := range entries {
 		e := &entries[i]
 		if e.Err != nil {
 			continue
 		}
-		if !git.IsRepo(e.Clone) {
-			if _, statErr := os.Stat(e.Clone); statErr == nil {
-				e.Err = errors.New(e.Clone + " exists but is not a git repository")
-				continue
-			}
-			m.logf("cloning %s into %s\n", e.Ref.URL, e.Clone)
-			if e.Err = m.Git.Clone(ctx, e.Ref.URL, e.Clone); e.Err != nil {
-				continue
-			}
-			fetched[e.Clone] = true
-		}
-		if fetch && !fetched[e.Clone] {
-			fetched[e.Clone] = true
-			m.logf("fetching %s\n", e.Ref.Path)
-			if err := m.Git.Fetch(ctx, e.Clone); err != nil {
-				e.Warning = "fetch failed: " + errorSummary(err)
-			}
-		}
 		if e.Present() {
+			if fetch {
+				m.logf("fetching %s\n", e.Ref.Path)
+				if err := m.Git.Fetch(ctx, e.Dir); err != nil {
+					e.Warning = "fetch failed: " + errorSummary(err)
+				}
+			}
 			continue
+		}
+		if !git.IsRepo(e.Cache) {
+			if _, statErr := os.Stat(e.Cache); statErr == nil {
+				e.Err = errors.New(e.Cache + " exists but is not a git repository")
+				continue
+			}
+			m.logf("cloning %s into %s\n", e.Ref.URL, e.Cache)
+			if e.Err = m.Git.Clone(ctx, e.Ref.URL, e.Cache); e.Err != nil {
+				continue
+			}
 		}
 		dir := freeDir(sessionDir, *e)
-		m.logf("creating worktree %s on branch %s\n", dir, e.Branch)
-		if err := m.Git.AddWorktree(ctx, e.Clone, dir, e.Branch); err != nil {
-			e.Err = err
-			continue
+		m.logf("creating %s on branch %s\n", dir, e.Branch)
+		if err := m.Git.CloneSession(ctx, e.Cache, e.Ref.URL, dir, e.Branch); err != nil {
+			if !errors.Is(err, git.ErrFetch) {
+				os.RemoveAll(dir)
+				e.Err = err
+				continue
+			}
+			e.Warning = "fetch failed, created from the local cache: " + errorSummary(err)
 		}
 		e.Dir = dir
 	}
@@ -240,25 +241,19 @@ func (m *Manager) Prepare(ctx context.Context, id string, s *config.Session, fet
 }
 
 func (m *Manager) refresh(ctx context.Context, entries []Entry, fetch bool) {
-	defaults := map[string]string{}
-	fetched := map[string]bool{}
 	for i := range entries {
 		e := &entries[i]
 		if e.Err != nil || !e.Present() {
 			continue
 		}
-		if fetch && !fetched[e.Clone] {
-			fetched[e.Clone] = true
-			if err := m.Git.Fetch(ctx, e.Clone); err != nil {
+		if fetch {
+			if err := m.Git.Fetch(ctx, e.Dir); err != nil {
 				e.Warning = "fetch failed: " + errorSummary(err)
 			}
 		}
-		def, ok := defaults[e.Clone]
-		if !ok {
-			if b, err := m.Git.DefaultBranch(ctx, e.Clone); err == nil {
-				def = "origin/" + b
-			}
-			defaults[e.Clone] = def
+		def := ""
+		if b, err := m.Git.DefaultBranch(ctx, e.Dir); err == nil {
+			def = "origin/" + b
 		}
 		e.Status, e.Err = m.Git.Status(ctx, e.Dir, def)
 	}
@@ -305,44 +300,14 @@ func (m *Manager) FastForward(ctx context.Context, entries []Entry) {
 	}
 }
 
-// RemoveWorktree deletes the entry's worktree, discarding uncommitted
-// changes; the branch is deleted too when deleteBranch is set.
-func (m *Manager) RemoveWorktree(ctx context.Context, e Entry, deleteBranch bool) error {
-	if !e.Present() {
-		return nil
-	}
-	if err := m.Git.RemoveWorktree(ctx, e.Clone, e.Dir); err != nil {
-		return err
-	}
-	if deleteBranch && e.Branch != "" {
-		return m.Git.DeleteBranch(ctx, e.Clone, e.Branch)
-	}
-	return nil
-}
-
-// Remove deletes every worktree of the session, then the session directory.
-// Uncommitted changes are lost; commits stay reachable from their branch in
-// the shared clone unless deleteBranches is set.
-func (m *Manager) Remove(ctx context.Context, id string, deleteBranches bool) error {
+// Remove deletes the session directory. Uncommitted changes and unpushed
+// commits of its repositories are lost; the shared caches are kept.
+func (m *Manager) Remove(id string) error {
 	sessionDir, err := m.SessionDir(id)
 	if err != nil {
 		return err
 	}
-	worktrees, err := m.scan(ctx, sessionDir)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, w := range worktrees {
-		e := Entry{Clone: w.clone, Dir: w.dir, Branch: w.branch}
-		if err := m.RemoveWorktree(ctx, e, deleteBranches); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if err := os.RemoveAll(sessionDir); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return os.RemoveAll(sessionDir)
 }
 
 func errorSummary(err error) string {

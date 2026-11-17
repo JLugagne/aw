@@ -6,8 +6,8 @@ const agentsGuide = `Reference for LLM agents (Claude Code, codex, ...) and scri
 
 CONTEXT
   A session groups repositories. Its workspace is one directory holding one
-  git worktree per repository; shared clones live under the config "base"
-  (<base>/<host>/<owner>/<name>). When aw launches you, your working directory
+  standalone clone per repository (origin = the real remote), created from a
+  shared cache under the config "base" (<base>/<host>/<owner>/<name>). When aw launches you, your working directory
   is the session directory and these variables are set:
     AW_SESSION   id of the current session
     PWD          the session directory (same as "aw path $AW_SESSION")
@@ -17,7 +17,8 @@ NON-INTERACTIVE RULES
   - never run "aw run" or "aw edit": they replace the process with an
     interactive program. Use "aw sync" to prepare a session.
   - pass -y to "remove"/"detach" when nothing would be lost; they still refuse
-    if a worktree has uncommitted changes or unpushed commits. Only add
+    if a repository has uncommitted changes, commits on any branch that are
+    not on a remote, or stashes: deleting it loses them. Only add
     --force when the user explicitly accepted losing that work.
   - pass --pull to "sync" to fast-forward repositories that are behind,
     otherwise nothing is pulled.
@@ -33,11 +34,12 @@ REPOSITORY SPECS
   optional @branch suffix    github.com/acme/api@feature-x
   Without a branch the session id is the branch name: checked out from
   origin/<branch> when it exists, otherwise created from the remote default
-  branch. One branch cannot be checked out in two sessions at once.
+  branch. The same branch can be used by several sessions; each has its own
+  clone, so push to share commits between them.
 
 RECIPES
-  Add a repository to the current session (worktree created immediately,
-  at $PWD/<name>):
+  Add a repository to the current session (cloned immediately into
+  $PWD/<name>):
     aw add "$AW_SESSION" github.com/acme/infra
     aw add "$AW_SESSION" github.com/acme/api@hotfix-42
 
@@ -62,13 +64,13 @@ JSON OUTPUT
     [{"id", "name", "path", "exists", "projects": [{"repo", "branch"}]}]
   aw show --json <s> / aw sync --json <s>
     {"id", "name", "path", "projects": [{
-       "project": {"repo", "branch"}, "clone", "branch", "dir",
+       "project": {"repo", "branch"}, "cache", "branch", "dir",
        "status": {"branch", "upstream", "base", "ahead", "behind",
-                  "dirty", "unpushed"},
+                  "dirty", "unpushed", "stashes"},
        "orphan", "warning", "error"}]}
-    "dir" is empty when the worktree does not exist yet; "base" is the ref
-    ahead/behind are computed against; "orphan" marks a worktree on disk that
-    is no longer in the config.
+    "dir" is empty when the repository is not cloned yet; "base" is the ref
+    ahead/behind are computed against; "orphan" marks a repository on disk
+    that is no longer in the config.
 `
 
 func (a *App) agentsTopic() *cobra.Command {
