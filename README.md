@@ -130,6 +130,20 @@ aw config sync
 Your usual git credentials are used. A GitHub "secret" gist can be read by
 anyone who has its URL; GitLab snippets can be truly private.
 
+> **Fine-grained tokens.** aw only runs `git clone`, `fetch` and `push`.
+> With an SSH URL your SSH key is used, and no token is involved. With an
+> HTTPS URL, or to create the snippet or gist from the command line, a
+> fine-grained personal access token must include the matching permissions:
+>
+> - **GitLab:** `Snippet: Create` to create the snippet (e.g. with
+>   `glab snippet create`), plus read and update access to snippets to
+>   clone and push.
+> - **GitHub:** the `Gists` permission set to read and write.
+>
+> Otherwise GitLab answers `403 insufficient_granular_scope`. The simplest
+> setup is to create the snippet or gist in the web UI and use its SSH clone
+> URL.
+
 **Revisions.** Every push is a commit, and its position in the history is
 the revision number (`revision 12 (laptop, 2h ago)`). Each machine remembers
 the revision it last synced. Like an event stream, it only pushes on top of
