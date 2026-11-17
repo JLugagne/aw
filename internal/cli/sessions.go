@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -266,14 +265,14 @@ func addProjects(cfg *config.Config, id string, s *config.Session, specs []strin
 		if b == "" {
 			b = defaultBranch
 		}
-		ref, err := repo.Parse(r, cfg.Protocol)
+		ref, err := repo.Parse(r, cfg.ProtocolName())
 		if err != nil {
 			return errors.Join(fmt.Errorf("add %q", spec), err)
 		}
 		p := config.Project{Repo: r, Branch: b}
 		duplicate := false
 		for _, existing := range s.Projects {
-			eref, err := repo.Parse(existing.Repo, cfg.Protocol)
+			eref, err := repo.Parse(existing.Repo, cfg.ProtocolName())
 			if err == nil && eref.Path == ref.Path && effectiveBranch(id, existing) == effectiveBranch(id, p) {
 				duplicate = true
 				break
@@ -346,12 +345,12 @@ work triggers a warning and an extra confirmation.`,
 
 func findProject(cfg *config.Config, id string, s *config.Session, query, branch string) (int, error) {
 	var matches []int
-	qref, qerr := repo.Parse(query, cfg.Protocol)
+	qref, qerr := repo.Parse(query, cfg.ProtocolName())
 	for i, p := range s.Projects {
 		if branch != "" && effectiveBranch(id, p) != branch {
 			continue
 		}
-		ref, err := repo.Parse(p.Repo, cfg.Protocol)
+		ref, err := repo.Parse(p.Repo, cfg.ProtocolName())
 		switch {
 		case p.Repo == query:
 		case err == nil && qerr == nil && ref.Path == qref.Path:
@@ -487,31 +486,4 @@ func (a *App) pathCmd() *cobra.Command {
 			return nil
 		},
 	}
-}
-
-func (a *App) configCmd() *cobra.Command {
-	var printPath bool
-	cmd := &cobra.Command{
-		Use:   "config",
-		Short: "Open the config file in your editor",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, path, err := a.load()
-			if err != nil {
-				return err
-			}
-			if printPath {
-				fmt.Fprintln(a.Out, path)
-				return nil
-			}
-			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				if err := cfg.Save(path); err != nil {
-					return err
-				}
-			}
-			return a.launch(cfg.EditorCommand(""), []string{path}, filepath.Dir(path), nil)
-		},
-	}
-	cmd.Flags().BoolVar(&printPath, "path", false, "only print the config file path")
-	return cmd
 }

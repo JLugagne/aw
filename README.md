@@ -51,6 +51,7 @@ aw edit billing                      # open the session folder in your editor
 aw pin billing                       # save the branches checked out in the session into the config
 cd "$(aw path billing)"
 aw remove billing                    # warns about uncommitted / unpushed work first
+aw config sync                       # share sessions with your other machines (see below)
 aw upgrade                           # self-update
 ```
 
@@ -89,6 +90,77 @@ sessions:
 
 Unknown keys are rejected. Commands that modify the file rewrite it, which
 drops comments.
+
+### Machine-specific settings
+
+`config.local.yaml`, next to `config.yaml`, overrides it on this machine
+only. It is never synced, so put there whatever differs between your
+computers: `base`, `workspaces`, `tool`, `editor`, `protocol`, `tools`, and
+the `sync` section. `aw config --local` opens it. Sessions are not allowed
+in it.
+
+```yaml
+# ~/.config/aw/config.local.yaml
+base: ~/code
+editor: nvim
+sync:
+  remote: git@gitlab.com:snippets/4242.git
+  file: aw.yaml        # file name inside the remote (default aw.yaml)
+  auto: true
+```
+
+## Sync between machines
+
+`config.yaml` can be shared through **any git remote**, with no server of
+your own:
+
+| Remote | URL |
+|---|---|
+| GitHub gist | `git@gist.github.com:<id>.git` or `https://gist.github.com/<id>.git` |
+| GitLab snippet | `git@gitlab.com:snippets/<id>.git` (project snippet: `git@gitlab.com:<group>/<project>/snippets/<id>.git`) |
+| Repository | any URL, self-hosted included |
+
+Create the gist or snippet with any placeholder file, then on each machine:
+
+```sh
+aw config remote git@gitlab.com:snippets/4242.git --auto
+aw config sync
+```
+
+Your usual git credentials are used. A GitHub "secret" gist can be read by
+anyone who has its URL; GitLab snippets can be truly private.
+
+**Revisions.** Every push is a commit, and its position in the history is
+the revision number (`revision 12 (laptop, 2h ago)`). Each machine remembers
+the revision it last synced. Like an event stream, it only pushes on top of
+that revision:
+
+- only the remote changed: pull
+- only this machine changed: push
+- both changed (**desync**): three-way merge, session by session. A session
+  added, edited or removed on one side only is merged automatically. When
+  the same session, or the global settings, changed on both sides, you see
+  the diff and choose `[l]ocal`, `[r]emote` or `[a]bort`. Without a
+  terminal, pass `--ours` or `--theirs`.
+- if another machine pushed in the meantime, the push is rejected and the
+  merge starts again.
+
+On the first sync of a machine, the remote's global settings win and the
+sessions of both sides are combined.
+
+```sh
+aw config status    # revision of each side, "in sync" / "DESYNC" ...
+aw config sync      # pull, push or merge
+```
+
+**Auto mode** (`--auto`, i.e. `sync.auto: true`):
+
+- `create`, `add`, `detach`, `remove` and `pin` sync before running and
+  push after. A desync stops the command until you resolve it.
+- `run`, `edit` and `sync` pull first.
+- If the network is down, commands still work and a warning tells you to
+  run `aw config sync` later.
+- `ls`, `show` and shell completion never touch the network.
 
 ## How it works
 
@@ -141,7 +213,10 @@ drops comments.
 | `aw sync <s> [--pull] [--json]` | prepare without launching anything |
 | `aw pin <s> [repo...] [--dry-run]` | write the checked-out branches into the session config |
 | `aw path <s>` | print the session directory |
-| `aw config [--path]` | edit the config file |
+| `aw config [--local] [--path]` | edit config.yaml (or the machine overlay) |
+| `aw config remote [url] [--file] [--auto] [--unset]` | show or set the sync remote |
+| `aw config status [--json]` | compare with the remote revision |
+| `aw config sync [--ours\|--theirs] [--json]` | pull, push or merge the config |
 | `aw upgrade [--check] [--force] [--source]` | self-update from GitHub releases |
 
 Repositories can be written as `host/owner/name`, scp-like

@@ -55,7 +55,9 @@ func (s Status) HasLocalWork() bool {
 	return s.Dirty > 0 || s.Unpushed > 0 || s.Stashes > 0
 }
 
-func (g Git) run(ctx context.Context, dir string, args ...string) (string, error) {
+// Run executes git in dir and returns its trimmed stdout; the error carries
+// the command line and stderr.
+func (g Git) Run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
@@ -98,7 +100,7 @@ func (g Git) Clone(ctx context.Context, url, dest string) error {
 
 // Fetch updates the remote-tracking refs of origin and prunes deleted ones.
 func (g Git) Fetch(ctx context.Context, repoDir string) error {
-	_, err := g.run(ctx, repoDir, "fetch", "--prune", "--quiet", "origin")
+	_, err := g.Run(ctx, repoDir, "fetch", "--prune", "--quiet", "origin")
 	return err
 }
 
@@ -106,13 +108,13 @@ func (g Git) Fetch(ctx context.Context, repoDir string) error {
 // "origin/" prefix. It returns ErrNoDefaultBranch.
 func (g Git) DefaultBranch(ctx context.Context, repoDir string) (string, error) {
 	resolve := func() (string, error) {
-		out, err := g.run(ctx, repoDir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+		out, err := g.Run(ctx, repoDir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
 		return strings.TrimPrefix(out, "origin/"), err
 	}
 	if b, err := resolve(); err == nil {
 		return b, nil
 	}
-	if _, err := g.run(ctx, repoDir, "remote", "set-head", "origin", "--auto"); err == nil {
+	if _, err := g.Run(ctx, repoDir, "remote", "set-head", "origin", "--auto"); err == nil {
 		if b, err := resolve(); err == nil {
 			return b, nil
 		}
@@ -126,7 +128,7 @@ func (g Git) DefaultBranch(ctx context.Context, repoDir string) (string, error) 
 }
 
 func (g Git) refExists(ctx context.Context, repoDir, ref string) bool {
-	_, err := g.run(ctx, repoDir, "show-ref", "--verify", "--quiet", ref)
+	_, err := g.Run(ctx, repoDir, "show-ref", "--verify", "--quiet", ref)
 	return err == nil
 }
 
@@ -154,27 +156,27 @@ func (g Git) CloneSession(ctx context.Context, cache, url, dir, branch string) e
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return err
 	}
-	if _, err := g.run(ctx, filepath.Dir(dir), "clone", "--quiet", "--no-checkout", cache, dir); err != nil {
+	if _, err := g.Run(ctx, filepath.Dir(dir), "clone", "--quiet", "--no-checkout", cache, dir); err != nil {
 		return err
 	}
 	initial := g.CurrentBranch(ctx, dir)
-	if _, err := g.run(ctx, dir, "remote", "set-url", "origin", url); err != nil {
+	if _, err := g.Run(ctx, dir, "remote", "set-url", "origin", url); err != nil {
 		return err
 	}
 	fetchErr := g.Fetch(ctx, dir)
-	if _, err := g.run(ctx, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+def); err != nil {
+	if _, err := g.Run(ctx, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+def); err != nil {
 		return err
 	}
 	if g.RemoteBranchExists(ctx, dir, branch) {
-		_, err = g.run(ctx, dir, "checkout", "--quiet", "--track", "-B", branch, "origin/"+branch)
+		_, err = g.Run(ctx, dir, "checkout", "--quiet", "--track", "-B", branch, "origin/"+branch)
 	} else {
-		_, err = g.run(ctx, dir, "checkout", "--quiet", "--no-track", "-B", branch, "origin/"+def)
+		_, err = g.Run(ctx, dir, "checkout", "--quiet", "--no-track", "-B", branch, "origin/"+def)
 	}
 	if err != nil {
 		return err
 	}
 	if initial != "" && initial != branch {
-		if _, err := g.run(ctx, dir, "branch", "-D", initial); err != nil {
+		if _, err := g.Run(ctx, dir, "branch", "-D", initial); err != nil {
 			return err
 		}
 	}
@@ -186,12 +188,12 @@ func (g Git) CloneSession(ctx context.Context, cache, url, dir, branch string) e
 
 // RemoteURL returns the URL of origin.
 func (g Git) RemoteURL(ctx context.Context, dir string) (string, error) {
-	return g.run(ctx, dir, "remote", "get-url", "origin")
+	return g.Run(ctx, dir, "remote", "get-url", "origin")
 }
 
 // CurrentBranch returns the checked-out branch, "" when HEAD is detached.
 func (g Git) CurrentBranch(ctx context.Context, dir string) string {
-	b, err := g.run(ctx, dir, "symbolic-ref", "--quiet", "--short", "HEAD")
+	b, err := g.Run(ctx, dir, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
 		return ""
 	}
@@ -202,21 +204,21 @@ func (g Git) CurrentBranch(ctx context.Context, dir string) string {
 // the branch has no upstream (typically "origin/main").
 func (g Git) Status(ctx context.Context, dir, fallbackBase string) (Status, error) {
 	s := Status{Branch: g.CurrentBranch(ctx, dir)}
-	porcelain, err := g.run(ctx, dir, "status", "--porcelain")
+	porcelain, err := g.Run(ctx, dir, "status", "--porcelain")
 	if err != nil {
 		return s, err
 	}
 	if porcelain != "" {
 		s.Dirty = strings.Count(porcelain, "\n") + 1
 	}
-	if up, err := g.run(ctx, dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err == nil {
+	if up, err := g.Run(ctx, dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err == nil {
 		s.Upstream = up
 		s.Base = up
 	} else {
 		s.Base = fallbackBase
 	}
 	if s.Base != "" {
-		counts, err := g.run(ctx, dir, "rev-list", "--left-right", "--count", "HEAD..."+s.Base)
+		counts, err := g.Run(ctx, dir, "rev-list", "--left-right", "--count", "HEAD..."+s.Base)
 		if err != nil {
 			return s, err
 		}
@@ -224,12 +226,12 @@ func (g Git) Status(ctx context.Context, dir, fallbackBase string) (Status, erro
 		s.Ahead, _ = strconv.Atoi(left)
 		s.Behind, _ = strconv.Atoi(right)
 	}
-	unpushed, err := g.run(ctx, dir, "rev-list", "--count", "HEAD", "--branches", "--not", "--remotes")
+	unpushed, err := g.Run(ctx, dir, "rev-list", "--count", "HEAD", "--branches", "--not", "--remotes")
 	if err != nil {
 		return s, err
 	}
 	s.Unpushed, _ = strconv.Atoi(unpushed)
-	stashes, err := g.run(ctx, dir, "rev-list", "--walk-reflogs", "--count", "refs/stash")
+	stashes, err := g.Run(ctx, dir, "rev-list", "--walk-reflogs", "--count", "refs/stash")
 	if err == nil {
 		s.Stashes, _ = strconv.Atoi(stashes)
 	}
@@ -239,6 +241,6 @@ func (g Git) Status(ctx context.Context, dir, fallbackBase string) (Status, erro
 // FastForward merges ref into the current branch only if no merge commit is
 // needed.
 func (g Git) FastForward(ctx context.Context, dir, ref string) error {
-	_, err := g.run(ctx, dir, "merge", "--ff-only", "--quiet", ref)
+	_, err := g.Run(ctx, dir, "merge", "--ff-only", "--quiet", ref)
 	return err
 }

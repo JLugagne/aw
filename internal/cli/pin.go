@@ -65,7 +65,7 @@ names to pin only those.`,
 					continue
 				case current == effectiveBranch(id, s.Projects[i]):
 					continue
-				case conflicts(cfg.Protocol, id, s.Projects, i, current):
+				case conflicts(cfg.ProtocolName(), id, s.Projects, i, current):
 					fmt.Fprintf(a.Err, "skipping %s: the session already has it on branch %s\n", e.Project.Repo, current)
 					continue
 				}

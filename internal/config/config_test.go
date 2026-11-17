@@ -162,3 +162,79 @@ func TestResolveToolMergesBuiltin(t *testing.T) {
 		t.Fatal("config override leaked into the builtin definition")
 	}
 }
+
+func TestLocalOverlay(t *testing.T) {
+	dir := t.TempDir()
+	shared := filepath.Join(dir, "config.yaml")
+	local := filepath.Join(dir, "config.local.yaml")
+	write := func(p, s string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(shared, "base: /shared/src\ntool: claude\neditor: vim\nprotocol: ssh\ntools:\n  claude:\n    args: [--a]\nsessions:\n  s1:\n    projects:\n      - repo: github.com/o/r\n")
+	write(local, "base: /local/src\neditor: code -n\nprotocol: https\ntools:\n  claude:\n    args: [--b]\nsync:\n  remote: git@gist.github.com:abc.git\n  file: aw.yaml\n  auto: true\n")
+
+	c, err := config.Load(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base, _ := c.BaseDir(); base != "/local/src" {
+		t.Fatalf("base = %q", base)
+	}
+	if got := c.EditorCommand(""); got[0] != "code" {
+		t.Fatalf("editor = %v", got)
+	}
+	if c.ProtocolName() != "https" || c.ToolName() != "claude" {
+		t.Fatalf("protocol=%q tool=%q", c.ProtocolName(), c.ToolName())
+	}
+	if got := c.ResolveTool("claude").Args; len(got) != 1 || got[0] != "--b" {
+		t.Fatalf("local tool overlay not applied: %v", got)
+	}
+	s := c.SyncSettings()
+	if s.Remote != "git@gist.github.com:abc.git" || s.FileName() != "aw.yaml" || !s.Auto {
+		t.Fatalf("sync = %+v", s)
+	}
+	if c.LocalPath() != local {
+		t.Fatalf("local path = %q", c.LocalPath())
+	}
+
+	if _, err := c.AddSession("s2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Save(shared); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "/local/src") || strings.Contains(string(data), "gist") || !strings.Contains(string(data), "/shared/src") {
+		t.Fatalf("local values leaked into the shared file:\n%s", data)
+	}
+
+	if err := c.SetSync(config.Sync{Remote: "https://gitlab.com/snippets/1.git"}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := config.Load(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.SyncSettings().Remote != "https://gitlab.com/snippets/1.git" || again.SyncSettings().FileName() != config.DefaultSyncFile {
+		t.Fatalf("SetSync not persisted: %+v", again.SyncSettings())
+	}
+	if base, _ := again.BaseDir(); base != "/local/src" {
+		t.Fatal("SetSync dropped the other local settings")
+	}
+}
+
+func TestLocalOverlayRejectsSessions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.local.yaml"), []byte("sessions:\n  x: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(filepath.Join(dir, "config.yaml")); err == nil {
+		t.Fatal("sessions in config.local.yaml must be rejected")
+	}
+}

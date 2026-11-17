@@ -15,8 +15,9 @@ import (
 
 // Defaults applied when the corresponding key is missing from the file.
 const (
-	DefaultBase = "~/src"
-	DefaultTool = "claude"
+	DefaultBase     = "~/src"
+	DefaultTool     = "claude"
+	DefaultSyncFile = "aw.yaml"
 )
 
 var (
@@ -56,16 +57,40 @@ type Tool struct {
 	Env map[string]string `yaml:"env,omitempty"`
 }
 
-// Config mirrors the YAML file. Use the accessor methods rather than the raw
-// fields: they apply defaults and expand "~" and environment variables.
+// Sync configures "aw config sync". It normally lives in config.local.yaml.
+type Sync struct {
+	// Remote is any git URL: a GitHub gist, a GitLab snippet or a repository.
+	Remote string `yaml:"remote"`
+	File   string `yaml:"file,omitempty"`
+	// Auto syncs before and after every command that modifies the config,
+	// and before run, edit and sync.
+	Auto bool `yaml:"auto,omitempty"`
+}
+
+// FileName is the name of the config file inside the remote.
+func (s Sync) FileName() string {
+	if s.File == "" {
+		return DefaultSyncFile
+	}
+	return s.File
+}
+
+// Config mirrors config.yaml, overlaid by config.local.yaml. Use the accessor
+// methods rather than the raw fields: they apply the local overlay and the
+// defaults, and expand "~" and environment variables. Save only writes the
+// shared file.
 type Config struct {
-	Base       string              `yaml:"base"`
+	Base       string              `yaml:"base,omitempty"`
 	Workspaces string              `yaml:"workspaces,omitempty"`
 	Tool       string              `yaml:"tool,omitempty"`
 	Editor     string              `yaml:"editor,omitempty"`
 	Protocol   string              `yaml:"protocol,omitempty"`
 	Tools      map[string]Tool     `yaml:"tools,omitempty"`
+	Sync       *Sync               `yaml:"sync,omitempty"`
 	Sessions   map[string]*Session `yaml:"sessions,omitempty"`
+
+	local     *Config
+	localPath string
 }
 
 var builtinTools = map[string]Tool{
@@ -95,19 +120,57 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".config", "aw", "config.yaml"), nil
 }
 
-// Load reads path. A missing file yields an empty configuration so the first
-// "aw create" can bootstrap it. Unknown keys are rejected to surface typos.
+// LocalPathFor returns the machine-specific overlay of path:
+// config.yaml -> config.local.yaml.
+func LocalPathFor(path string) string {
+	ext := filepath.Ext(path)
+	return strings.TrimSuffix(path, ext) + ".local" + ext
+}
+
+// Load reads path and its overlay (see LocalPathFor). Missing files yield an
+// empty configuration so the first "aw create" can bootstrap it. Unknown keys
+// are rejected to surface typos; sessions are rejected in the overlay.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return &Config{Base: DefaultBase, Sessions: map[string]*Session{}}, nil
+		data, err = nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var c Config
-	if err := yaml.Load(data, &c, yaml.WithKnownFields()); err != nil {
+	c, err := Parse(data)
+	if err != nil {
 		return nil, errors.Join(errors.New("parse "+path), err)
+	}
+	if data == nil {
+		c.Base = DefaultBase
+	}
+	c.localPath = LocalPathFor(path)
+	localData, err := os.ReadFile(c.localPath)
+	if errors.Is(err, os.ErrNotExist) {
+		localData, err = nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	local, err := Parse(localData)
+	if err != nil {
+		return nil, errors.Join(errors.New("parse "+c.localPath), err)
+	}
+	if len(local.Sessions) > 0 {
+		return nil, errors.New(c.localPath + ": sessions belong in " + filepath.Base(path))
+	}
+	c.local = local
+	return c, nil
+}
+
+// Parse decodes the content of a shared config file.
+func Parse(data []byte) (*Config, error) {
+	var c Config
+	if len(data) > 0 {
+		if err := yaml.Load(data, &c, yaml.WithKnownFields()); err != nil {
+			return nil, err
+		}
 	}
 	if c.Sessions == nil {
 		c.Sessions = map[string]*Session{}
@@ -120,13 +183,71 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Save writes the configuration atomically, creating parent directories.
-// Comments present in the original file are not preserved.
+// Marshal encodes the shared part of the configuration.
+func (c *Config) Marshal() ([]byte, error) {
+	return yaml.Dump(c, yaml.WithIndent(2))
+}
+
+// Save writes the shared configuration atomically, creating parent
+// directories. Comments present in the original file are not preserved.
 func (c *Config) Save(path string) error {
-	data, err := yaml.Dump(c, yaml.WithIndent(2))
+	data, err := c.Marshal()
 	if err != nil {
 		return err
 	}
+	return WriteFile(path, data)
+}
+
+// LocalPath is the overlay file of a configuration returned by Load.
+func (c *Config) LocalPath() string {
+	return c.localPath
+}
+
+// SetSync stores s in the overlay file, keeping its other settings.
+func (c *Config) SetSync(s Sync) error {
+	if c.localPath == "" {
+		return errors.New("configuration was not loaded from a file")
+	}
+	l := c.overlay()
+	l.Sync = &s
+	c.local = l
+	data, err := l.Marshal()
+	if err != nil {
+		return err
+	}
+	return WriteFile(c.localPath, data)
+}
+
+// SyncSettings returns the sync section of the overlay, else of the shared
+// file; Remote is empty when sync is not configured.
+func (c *Config) SyncSettings() Sync {
+	if l := c.overlay(); l.Sync != nil {
+		return *l.Sync
+	}
+	if c.Sync != nil {
+		return *c.Sync
+	}
+	return Sync{}
+}
+
+func (c *Config) overlay() *Config {
+	if c.local == nil {
+		return &Config{}
+	}
+	return c.local
+}
+
+func first(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// WriteFile atomically replaces path with data, creating parent directories.
+func WriteFile(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -151,18 +272,14 @@ func (c *Config) Save(path string) error {
 // BaseDir is the absolute directory holding the shared clones, laid out as
 // <base>/<host>/<owner>/<name>.
 func (c *Config) BaseDir() (string, error) {
-	b := c.Base
-	if b == "" {
-		b = DefaultBase
-	}
-	return ExpandPath(b)
+	return ExpandPath(first(c.overlay().Base, c.Base, DefaultBase))
 }
 
 // WorkspacesDir is the absolute directory holding one sub-directory per
 // session. It defaults to <base>/.aw/sessions.
 func (c *Config) WorkspacesDir() (string, error) {
-	if c.Workspaces != "" {
-		return ExpandPath(c.Workspaces)
+	if w := first(c.overlay().Workspaces, c.Workspaces); w != "" {
+		return ExpandPath(w)
 	}
 	base, err := c.BaseDir()
 	if err != nil {
@@ -173,16 +290,18 @@ func (c *Config) WorkspacesDir() (string, error) {
 
 // ToolName returns the configured default tool.
 func (c *Config) ToolName() string {
-	if c.Tool == "" {
-		return DefaultTool
-	}
-	return c.Tool
+	return first(c.overlay().Tool, c.Tool, DefaultTool)
+}
+
+// ProtocolName returns the clone protocol for host/owner/name specs.
+func (c *Config) ProtocolName() string {
+	return first(c.overlay().Protocol, c.Protocol)
 }
 
 // EditorCommand splits the configured editor (e.g. "code -n") into argv.
 // It falls back to $VISUAL, $EDITOR, then "vi".
 func (c *Config) EditorCommand(override string) []string {
-	for _, e := range []string{override, c.Editor, os.Getenv("VISUAL"), os.Getenv("EDITOR")} {
+	for _, e := range []string{override, c.overlay().Editor, c.Editor, os.Getenv("VISUAL"), os.Getenv("EDITOR")} {
 		if f := strings.Fields(e); len(f) > 0 {
 			return f
 		}
@@ -192,17 +311,23 @@ func (c *Config) EditorCommand(override string) []string {
 
 // ResolveTool returns the built-in definition of name (claude, codex,
 // opencode), or a bare command for any other name, overlaid with the fields
-// set in the "tools" section. Env maps are merged, the config winning.
+// set in the "tools" section of the shared file, then of the overlay. Env
+// maps are merged, the last layer winning.
 func (c *Config) ResolveTool(name string) Tool {
 	t := Tool{Command: name}
 	if b, ok := builtinTools[name]; ok {
 		t = b
 	}
 	t.Env = maps.Clone(t.Env)
-	o, ok := c.Tools[name]
-	if !ok {
-		return t
+	for _, layer := range []*Config{c, c.overlay()} {
+		if o, ok := layer.Tools[name]; ok {
+			t = overlayTool(t, o)
+		}
 	}
+	return t
+}
+
+func overlayTool(t, o Tool) Tool {
 	if o.Command != "" {
 		t.Command = o.Command
 	}
