@@ -460,3 +460,65 @@ func TestRunContinueKeepsAddDirs(t *testing.T) {
 		t.Fatalf("resume argv = %v", got)
 	}
 }
+
+func TestPinWritesCheckedOutBranches(t *testing.T) {
+	e := setup(t)
+	urlA, _ := e.remote("alpha")
+	urlB, _ := e.remote("beta")
+	urlC, _ := e.remote("gamma")
+	e.mustRun("create", "s1", urlA+"@feature_1", urlB, urlC)
+	e.mustRun("sync", "s1")
+	ws := filepath.Join(e.root, "ws", "s1")
+	e.git(filepath.Join(ws, "beta"), "checkout", "-q", "-b", "feature-x")
+	e.git(filepath.Join(ws, "gamma"), "checkout", "-q", "--detach")
+
+	out, stderr, err := e.run("", false, "pin", "--dry-run", "s1")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	if !strings.Contains(out, "s1 -> feature-x") {
+		t.Fatalf("dry run output:\n%s", out)
+	}
+	if e.config().Sessions["s1"].Projects[1].Branch != "" {
+		t.Fatal("--dry-run saved the config")
+	}
+
+	out, stderr, err = e.run("", false, "pin", "s1")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "detached") {
+		t.Fatalf("detached HEAD not reported:\n%s", stderr)
+	}
+	p := e.config().Sessions["s1"].Projects
+	if p[0].Branch != "feature_1" || p[1].Branch != "feature-x" || p[2].Branch != "" {
+		t.Fatalf("unexpected projects after pin: %+v", p)
+	}
+
+	again, _, err := e.run("", false, "pin", "s1")
+	if err != nil || !strings.Contains(again, "already") {
+		t.Fatalf("second pin should be a no-op: %v\n%s", err, again)
+	}
+	if _, _, err := e.run("", false, "sync", "s1"); err != nil {
+		t.Fatalf("sync after pin: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "beta-feature-x")); err == nil {
+		t.Fatal("pinned repository was cloned a second time")
+	}
+}
+
+func TestPinSelectedRepositories(t *testing.T) {
+	e := setup(t)
+	urlA, _ := e.remote("alpha")
+	urlB, _ := e.remote("beta")
+	e.mustRun("create", "s1", urlA, urlB)
+	e.mustRun("sync", "s1")
+	ws := filepath.Join(e.root, "ws", "s1")
+	e.git(filepath.Join(ws, "alpha"), "checkout", "-q", "-b", "a-branch")
+	e.git(filepath.Join(ws, "beta"), "checkout", "-q", "-b", "b-branch")
+	e.mustRun("pin", "s1", "beta")
+	p := e.config().Sessions["s1"].Projects
+	if p[0].Branch != "" || p[1].Branch != "b-branch" {
+		t.Fatalf("unexpected projects after selective pin: %+v", p)
+	}
+}

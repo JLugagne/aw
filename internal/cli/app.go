@@ -96,6 +96,7 @@ LLM agents and scripts: read "aw help agents" first.`,
 		a.pathCmd(),
 		a.configCmd(),
 		a.syncCmd(),
+		a.pinCmd(),
 		a.upgradeCmd(),
 		a.agentsTopic(),
 	)
