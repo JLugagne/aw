@@ -305,3 +305,23 @@ func TestFirstSyncTakesRemoteSettingsAndMergesSessions(t *testing.T) {
 		}
 	}
 }
+
+func TestPushIgnoresCommitSigning(t *testing.T) {
+	remote := newRemote(t)
+	cfg := os.Getenv("GIT_CONFIG_GLOBAL")
+	f, err := os.OpenFile(cfg, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a := newMachine(t, remote, "laptop")
+	a.write("tool: x\n")
+	if r := a.sync(nil); !r.Pushed {
+		t.Fatalf("not pushed: %+v", r)
+	}
+}

@@ -71,7 +71,8 @@ type Result struct {
 	Report []string `json:"report,omitempty"`
 }
 
-// Syncer syncs one configuration file. It is not safe for concurrent use.
+// Syncer syncs one configuration file. Its commits are bookkeeping: they are
+// never signed and skip commit hooks. It is not safe for concurrent use.
 type Syncer struct {
 	Git git.Git
 	// StateDir holds the clone of the remote and the last synced revision;
@@ -357,7 +358,7 @@ func (s *Syncer) push(ctx context.Context, sn snapshot, data []byte, message str
 	if _, err := s.Git.Run(ctx, dir, "add", "--", s.Settings.FileName()); err != nil {
 		return res, false, err
 	}
-	commit := []string{"commit", "--quiet", "-m", subjectPrefix + s.Host + ": " + message}
+	commit := []string{"-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify", "-m", subjectPrefix + s.Host + ": " + message}
 	if email, err := s.Git.Run(ctx, dir, "config", "user.email"); err != nil || email == "" {
 		commit = append([]string{"-c", "user.name=aw", "-c", "user.email=aw@" + s.Host}, commit...)
 	}
