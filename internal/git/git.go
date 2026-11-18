@@ -186,9 +186,10 @@ func (g Git) CloneSession(ctx context.Context, cache, url, dir, branch string) e
 	return nil
 }
 
-// RemoteURL returns the URL of origin.
+// RemoteURL returns the URL of origin as configured, before url.*.insteadOf
+// rewrites, so it can be compared with the URL aw cloned from.
 func (g Git) RemoteURL(ctx context.Context, dir string) (string, error) {
-	return g.Run(ctx, dir, "remote", "get-url", "origin")
+	return g.Run(ctx, dir, "config", "--get", "remote.origin.url")
 }
 
 // CurrentBranch returns the checked-out branch, "" when HEAD is detached.
