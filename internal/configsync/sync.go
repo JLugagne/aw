@@ -125,6 +125,9 @@ func (s *Syncer) prepare(ctx context.Context) (string, error) {
 	if s.Settings.Remote == "" {
 		return "", ErrNotConfigured
 	}
+	if err := s.Settings.Validate(); err != nil {
+		return "", err
+	}
 	dir := s.repoDir()
 	if url, err := s.Git.RemoteURL(ctx, dir); err != nil || url != s.Settings.Remote {
 		if err := os.RemoveAll(dir); err != nil {
@@ -133,8 +136,8 @@ func (s *Syncer) prepare(ctx context.Context) (string, error) {
 		if err := os.MkdirAll(s.StateDir, 0o700); err != nil {
 			return "", err
 		}
-		s.logf("cloning %s\n", s.Settings.Remote)
-		if _, err := s.Git.Run(ctx, s.StateDir, "clone", "--quiet", s.Settings.Remote, dir); err != nil {
+		s.logf("cloning %s\n", git.Redact(s.Settings.Remote))
+		if _, err := s.Git.Run(ctx, s.StateDir, "clone", "--quiet", "--", s.Settings.Remote, dir); err != nil {
 			return "", err
 		}
 	} else if err := s.Git.Fetch(ctx, dir); err != nil {

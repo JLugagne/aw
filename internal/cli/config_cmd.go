@@ -110,7 +110,7 @@ can be private.`,
 					fmt.Fprintln(a.Out, "not configured: aw config remote <git url>")
 					return nil
 				}
-				fmt.Fprintf(a.Out, "remote: %s\nfile:   %s\nauto:   %t\n", s.Remote, s.FileName(), s.Auto)
+				fmt.Fprintf(a.Out, "remote: %s\nfile:   %s\nauto:   %t\n", git.Redact(s.Remote), s.FileName(), s.Auto)
 				return nil
 			}
 			if len(args) == 1 {
@@ -125,10 +125,16 @@ can be private.`,
 			if s.Remote == "" {
 				return errors.New("a git URL is required")
 			}
+			if strings.HasPrefix(s.Remote, "-") {
+				return fmt.Errorf("invalid git URL %q", s.Remote)
+			}
+			if err := s.Validate(); err != nil {
+				return err
+			}
 			if err := cfg.SetSync(s); err != nil {
 				return err
 			}
-			fmt.Fprintf(a.Out, "config synced with %s (%s, auto=%t) - run: aw config sync\n", s.Remote, s.FileName(), s.Auto)
+			fmt.Fprintf(a.Out, "config synced with %s (%s, auto=%t) - run: aw config sync\n", git.Redact(s.Remote), s.FileName(), s.Auto)
 			return nil
 		},
 	}
@@ -181,7 +187,7 @@ func (a *App) configStatusCmd() *cobra.Command {
 				enc.SetIndent("", "  ")
 				return enc.Encode(st)
 			}
-			fmt.Fprintf(a.Out, "remote:   %s\nlocal:    based on %s", s.Settings.Remote, describeRevision(st.Base))
+			fmt.Fprintf(a.Out, "remote:   %s\nlocal:    based on %s", git.Redact(s.Settings.Remote), describeRevision(st.Base))
 			if st.LocalChanged {
 				fmt.Fprint(a.Out, ", modified since")
 			}

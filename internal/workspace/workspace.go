@@ -68,7 +68,7 @@ func (m *Manager) logf(format string, args ...any) {
 	}
 }
 
-func (m *Manager) plan(id string, s *config.Session) ([]Entry, error) {
+func (m *Manager) plan(ctx context.Context, id string, s *config.Session) ([]Entry, error) {
 	base, err := m.Config.BaseDir()
 	if err != nil {
 		return nil, err
@@ -80,6 +80,9 @@ func (m *Manager) plan(id string, s *config.Session) ([]Entry, error) {
 			e.Branch = id
 		}
 		e.Ref, e.Err = repo.Parse(p.Repo, m.Config.ProtocolName())
+		if e.Err == nil {
+			e.Err = m.Git.ValidBranch(ctx, e.Branch)
+		}
 		if e.Err == nil {
 			e.Cache = filepath.Join(base, filepath.FromSlash(e.Ref.Path))
 		}
@@ -148,7 +151,7 @@ func (m *Manager) Inspect(ctx context.Context, id string, s *config.Session, fet
 	if err != nil {
 		return nil, err
 	}
-	entries, err := m.plan(id, s)
+	entries, err := m.plan(ctx, id, s)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +194,7 @@ func (m *Manager) Prepare(ctx context.Context, id string, s *config.Session, fet
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return nil, err
 	}
-	entries, err := m.plan(id, s)
+	entries, err := m.plan(ctx, id, s)
 	if err != nil {
 		return nil, err
 	}

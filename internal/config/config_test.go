@@ -238,3 +238,60 @@ func TestLocalOverlayRejectsSessions(t *testing.T) {
 		t.Fatal("sessions in config.local.yaml must be rejected")
 	}
 }
+
+func TestParseRejectsUnsafeSessionIDs(t *testing.T) {
+	for _, id := range []string{"../victim", "..", "a/b", "-x"} {
+		src := "sessions:\n  \"" + id + "\":\n    projects: []\n"
+		if _, err := config.Parse([]byte(src)); !errors.Is(err, config.ErrInvalidID) {
+			t.Errorf("id %q: want ErrInvalidID, got %v", id, err)
+		}
+	}
+}
+
+func TestWriteFileKeepsSymlinkAndMode(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "dotfiles", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config.yaml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteFile(link, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink replaced: %v %v", fi, err)
+	}
+	fi, err := os.Stat(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(real); string(data) != "new" || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("got %q mode %v", data, fi.Mode().Perm())
+	}
+	fresh := filepath.Join(dir, "fresh.yaml")
+	if err := config.WriteFile(fresh, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(fresh); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("new file mode: %v %v", fi, err)
+	}
+}
+
+func TestSyncValidate(t *testing.T) {
+	for _, f := range []string{"", "aw.yaml", "sub.yaml"} {
+		if err := (config.Sync{File: f}).Validate(); err != nil {
+			t.Errorf("%q: %v", f, err)
+		}
+	}
+	for _, f := range []string{"../x", "a/b", "..", "-c"} {
+		if err := (config.Sync{File: f}).Validate(); err == nil {
+			t.Errorf("%q: want error", f)
+		}
+	}
+}

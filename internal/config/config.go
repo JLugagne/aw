@@ -4,6 +4,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -65,6 +66,16 @@ type Sync struct {
 	// Auto syncs before and after every command that modifies the config,
 	// and before run, edit and sync.
 	Auto bool `yaml:"auto,omitempty"`
+}
+
+// Validate checks that File names a file at the root of the remote, so it
+// cannot be used to write outside the local clone.
+func (s Sync) Validate() error {
+	f := s.FileName()
+	if f == "." || f == ".." || strings.ContainsAny(f, `/\`+"\x00") || strings.HasPrefix(f, "-") {
+		return fmt.Errorf("invalid sync file %q: use a plain file name such as %s", f, DefaultSyncFile)
+	}
+	return nil
 }
 
 // FileName is the name of the config file inside the remote.
@@ -176,6 +187,9 @@ func Parse(data []byte) (*Config, error) {
 		c.Sessions = map[string]*Session{}
 	}
 	for id, s := range c.Sessions {
+		if err := ValidateID(id); err != nil {
+			return nil, fmt.Errorf("session %q: %w", id, err)
+		}
 		if s == nil {
 			c.Sessions[id] = &Session{}
 		}
@@ -247,7 +261,17 @@ func first(values ...string) string {
 }
 
 // WriteFile atomically replaces path with data, creating parent directories.
+// A symlinked path (dotfile managers) is written through, so the link is kept.
+// An existing file keeps its permissions; a new one is private (0600) since it
+// may hold credentials, such as a token in the sync remote URL.
 func WriteFile(path string, data []byte) error {
+	mode := os.FileMode(0o600)
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+		if fi, err := os.Stat(path); err == nil {
+			mode = fi.Mode().Perm()
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -263,7 +287,7 @@ func WriteFile(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+	if err := os.Chmod(tmp.Name(), mode); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)

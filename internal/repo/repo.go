@@ -48,6 +48,10 @@ func Parse(spec, protocol string) (Ref, error) {
 	if s == "" {
 		return Ref{}, errors.Join(ErrInvalid, errors.New("empty repository"))
 	}
+	// A leading "-" would be read by git as an option (e.g. --upload-pack).
+	if strings.HasPrefix(s, "-") {
+		return Ref{}, errors.Join(ErrInvalid, errors.New("repository cannot start with '-': "+s))
+	}
 	host, p, cloneURL, err := split(s, protocol)
 	if err != nil {
 		return Ref{}, errors.Join(ErrInvalid, err)
@@ -56,12 +60,21 @@ func Parse(spec, protocol string) (Ref, error) {
 	if host == "" || p == "" {
 		return Ref{}, errors.Join(ErrInvalid, errors.New("missing host or path in "+s))
 	}
+	if !safeSegment(host) {
+		return Ref{}, errors.Join(ErrInvalid, errors.New("unsafe host in "+s))
+	}
 	for seg := range strings.SplitSeq(p, "/") {
-		if seg == ".." || seg == "." || seg == "" {
+		if !safeSegment(seg) {
 			return Ref{}, errors.Join(ErrInvalid, errors.New("unsafe path in "+s))
 		}
 	}
 	return Ref{Spec: s, Path: host + "/" + p, URL: cloneURL}, nil
+}
+
+// safeSegment reports whether s can be used as one directory name under the
+// base directory without escaping it.
+func safeSegment(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, `/\`+"\x00")
 }
 
 func split(s, protocol string) (string, string, string, error) {

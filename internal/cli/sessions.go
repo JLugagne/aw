@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/JLugagne/aw/internal/config"
+	"github.com/JLugagne/aw/internal/git"
 	"github.com/JLugagne/aw/internal/repo"
 	"github.com/JLugagne/aw/internal/workspace"
 )
@@ -268,6 +270,11 @@ func addProjects(cfg *config.Config, id string, s *config.Session, specs []strin
 		ref, err := repo.Parse(r, cfg.ProtocolName())
 		if err != nil {
 			return errors.Join(fmt.Errorf("add %q", spec), err)
+		}
+		if b != "" {
+			if err := (git.Git{}).ValidBranch(context.Background(), b); err != nil {
+				return errors.Join(fmt.Errorf("add %q", spec), err)
+			}
 		}
 		p := config.Project{Repo: r, Branch: b}
 		duplicate := false

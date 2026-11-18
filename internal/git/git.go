@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -64,7 +66,7 @@ func (g Git) Run(ctx context.Context, dir string, args ...string) (string, error
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		errs := []error{errors.New("git " + strings.Join(args, " "))}
+		errs := []error{errors.New(Redact("git " + strings.Join(args, " ")))}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			errs = append(errs, errors.New(msg))
 		}
@@ -84,7 +86,7 @@ func (g Git) Clone(ctx context.Context, url, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "clone", url, dest)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dest)
 	var stderr bytes.Buffer
 	out := io.Writer(&stderr)
 	if g.Progress != nil {
@@ -93,7 +95,7 @@ func (g Git) Clone(ctx context.Context, url, dest string) error {
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
-		return errors.Join(errors.New("git clone "+url), errors.New(strings.TrimSpace(stderr.String())), err)
+		return errors.Join(errors.New(Redact("git clone "+url)), errors.New(strings.TrimSpace(stderr.String())), err)
 	}
 	return nil
 }
@@ -142,6 +144,26 @@ func (g Git) RemoteBranchExists(ctx context.Context, repoDir, branch string) boo
 	return g.refExists(ctx, repoDir, "refs/remotes/origin/"+branch)
 }
 
+// ValidBranch checks that name is a usable branch name that git cannot
+// mistake for an option.
+func (g Git) ValidBranch(ctx context.Context, name string) error {
+	if name == "" || strings.HasPrefix(name, "-") {
+		return fmt.Errorf("invalid branch name %q", name)
+	}
+	if _, err := g.Run(ctx, "", "check-ref-format", "--branch", name); err != nil {
+		return fmt.Errorf("invalid branch name %q", name)
+	}
+	return nil
+}
+
+var credentials = regexp.MustCompile(`(?i)(https?://)[^/@\s]+@`)
+
+// Redact hides the credentials of http(s) URLs in s
+// (https://token@host -> https://***@host).
+func Redact(s string) string {
+	return credentials.ReplaceAllString(s, "${1}***@")
+}
+
 // CloneSession creates an independent repository at dir, checked out on
 // branch, so the same branch can be used by any number of sessions. Objects
 // are hardlinked from cache (copied across filesystems) and origin is set to
@@ -156,11 +178,11 @@ func (g Git) CloneSession(ctx context.Context, cache, url, dir, branch string) e
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return err
 	}
-	if _, err := g.Run(ctx, filepath.Dir(dir), "clone", "--quiet", "--no-checkout", cache, dir); err != nil {
+	if _, err := g.Run(ctx, filepath.Dir(dir), "clone", "--quiet", "--no-checkout", "--", cache, dir); err != nil {
 		return err
 	}
 	initial := g.CurrentBranch(ctx, dir)
-	if _, err := g.Run(ctx, dir, "remote", "set-url", "origin", url); err != nil {
+	if _, err := g.Run(ctx, dir, "remote", "set-url", "origin", "--", url); err != nil {
 		return err
 	}
 	fetchErr := g.Fetch(ctx, dir)

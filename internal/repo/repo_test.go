@@ -35,7 +35,8 @@ func TestParse(t *testing.T) {
 }
 
 func TestParseRejects(t *testing.T) {
-	for _, spec := range []string{"", "   ", "github.com", "github.com/../etc", "github.com/a/./b", "file:///"} {
+	for _, spec := range []string{"", "   ", "github.com", "github.com/../etc", "github.com/a/./b", "file:///",
+		"..:a/b", "ssh://../a/b", "-uevil:a/b", "--upload-pack=x:a/b"} {
 		t.Run(spec, func(t *testing.T) {
 			if _, err := repo.Parse(spec, ""); !errors.Is(err, repo.ErrInvalid) {
 				t.Fatalf("want ErrInvalid, got %v", err)
