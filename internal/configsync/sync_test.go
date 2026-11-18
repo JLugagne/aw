@@ -325,3 +325,29 @@ func TestPushIgnoresCommitSigning(t *testing.T) {
 		t.Fatalf("not pushed: %+v", r)
 	}
 }
+
+func TestInsteadOfRewriteDoesNotRecloneEverySync(t *testing.T) {
+	remote := newRemote(t)
+	cfg := os.Getenv("GIT_CONFIG_GLOBAL")
+	f, err := os.OpenFile(cfg, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[url \"" + remote + "\"]\n\tinsteadOf = aw-test:remote\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a := newMachine(t, "aw-test:remote", "laptop")
+	a.write("tool: x\n")
+	a.sync(nil)
+	marker := filepath.Join(a.syncer.StateDir, "repo", ".git", "aw-test-marker")
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.sync(nil)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("the sync clone was deleted and cloned again")
+	}
+}
